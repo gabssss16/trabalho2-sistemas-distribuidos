@@ -22,5 +22,5 @@ func PublicarEvento(ch *amqp.Channel, exchange, routingKey string, body []byte) 
 			Body:        body,
 		})
 	FailOnError(err, "Falha em publicar a mensagem")
-	log.Printf(" [x] enviado %s\n", body)
+	log.Printf("[x] Evento publicado com sucesso | Routing Key: %s", routingKey)
 }
