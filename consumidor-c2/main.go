@@ -4,8 +4,15 @@ import (
 	"log"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"trabalho2-sistemas-distribuidos/base"
 	"trabalho2-sistemas-distribuidos/base/rabbitmq"
 )
+
+type Promocao struct {
+	Produto   string `json:"produto"`
+	Desconto  int    `json:"desconto"`
+	Categoria string `json:"categoria"`
+}
 
 func main() {
 	conn := rabbitmq.Conectar()
@@ -14,26 +21,38 @@ func main() {
 	ch := rabbitmq.AbrirCanal(conn)
 	defer ch.Close()
 
-	// Garante que a exchange "Promoções" (topic) existe antes de tentar usá-la
 	rabbitmq.DeclararExchangePromocoes(ch)
-
-	// C2 cria sua própria fila
 	fila := rabbitmq.DeclararFila(ch, "fila_c2")
 
-	// C2 se inscreve em TODAS as categorias usando o curinga asterisco
+	// C2 se inscreve em TODAS as categorias usando o curinga
 	rabbitmq.VincularFila(ch, fila.Name, "promocao.categoria.*", rabbitmq.ExchangePromocoes)
 
-	// Regra do que fazer quando a mensagem chegar
 	handler := func(d amqp.Delivery) {
-		log.Printf("[C2] Promoção recebida na categoria %s: %s", d.RoutingKey, string(d.Body))
+		evento, err := base.DesserializarEvento(d.Body)
+		if err != nil {
+			log.Printf("[C2 - ERRO] Falha ao ler envelope: %v", err)
+			return
+		}
+
+		valido, err := base.ValidarAssinatura(evento, "consumidor-c2/keys/promocoes_public.pem")
+		if err != nil || !valido {
+			log.Printf("[C2 - ALERTA] Evento descartado! Assinatura inválida: %v", err)
+			return
+		}
+
+		var promo Promocao
+		err = base.DesserializarPayload(evento, &promo)
+		if err != nil {
+			log.Printf("[C2 - ERRO] Falha ao ler payload: %v", err)
+			return
+		}
+
+		log.Printf("[C2] VÁLIDO! Oferta: %s com %d%% OFF (Categoria %s)", promo.Produto, promo.Desconto, promo.Categoria)
 	}
 
 	log.Println("[*] Consumidor C2 aguardando TODAS as promoções... CTRL+C para sair")
-
-	// Inicia o consumo assíncrono em segundo plano
 	rabbitmq.IniciarConsumo(ch, fila.Name, handler)
 
-	// Trava a execução para o terminal não fechar
 	var forever chan struct{}
 	<-forever
 }
