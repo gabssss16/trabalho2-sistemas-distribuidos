@@ -64,6 +64,7 @@ func TestTratarEvento(t *testing.T) {
 		{"tipo alterado", base.EstoqueOK, base.PedidoCriado, func(e *base.Event) { e.Type = base.PedidoEnviado }, base.PedidoCriado},
 		{"excluído não volta a ativo", base.EstoqueOK, base.PedidoExcluido, nil, base.PedidoExcluido},
 		{"enviado não retrocede", base.PagamentoAprovado, base.PedidoEnviado, nil, base.PedidoEnviado},
+		{"estoque atrasado não regride pagamento", base.EstoqueOK, base.PagamentoAprovado, nil, base.PagamentoAprovado},
 	}
 	for _, caso := range casos {
 		t.Run(caso.nome, func(t *testing.T) {

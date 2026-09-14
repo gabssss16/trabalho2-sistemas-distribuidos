@@ -206,6 +206,10 @@ func TratarEvento(ch *amqp.Channel, delivery amqp.Delivery) {
 	if !existe || pedidoFinalizado(pedido.Status) {
 		return
 	}
+	// Eventos de produtores diferentes podem chegar fora de ordem.
+	if evento.Type == base.EstoqueOK && pedido.Status == base.PagamentoAprovado {
+		return
+	}
 	if evento.Type == base.EstoqueIndisponivel || evento.Type == base.PagamentoRecusado {
 		// Usa os itens originais, mesmo quando a resposta contém apenas o ID.
 		payload.Items = pedido.Itens
