@@ -13,7 +13,7 @@ func FailOnError(err error, msg string) {
 }
 
 func Conectar() *amqp.Connection {
-	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672/")
+	conn, err := amqp.Dial("amqp://guest:guest@127.0.0.1:5672/")
 	FailOnError(err, "Falha ao conectar ao RabbitMQ")
 	return conn
 }
