@@ -1,11 +1,11 @@
 package main
 
 import (
-	"encoding/json"
 	"log"
 	"math/rand"
 	"time"
 
+	"trabalho2-sistemas-distribuidos/base"
 	"trabalho2-sistemas-distribuidos/base/rabbitmq"
 )
 
@@ -64,14 +64,28 @@ func main() {
 		novaPromocao := sortearPromocao()
 		routingKey := "promocao.categoria." + novaPromocao.Categoria
 
-		// Converte a struct para formato JSON (bytes)
-		body, err := json.Marshal(novaPromocao)
+		// 1. Cria o envelope no padrão esperado por todo o sistema
+		evento, err := base.CriarEvento(routingKey, "promocoes", novaPromocao)
 		if err != nil {
-			log.Printf("[ERRO] Falha ao converter promoção: %v", err)
+			log.Printf("[ERRO] Falha ao empacotar evento: %v", err)
 			continue
 		}
 
-		// Publica na exchange utilizando a routing key do jogo sorteado
+		// 2. Assina o evento utilizando a chave privada gerada na pasta correta
+		err = base.AssinarEvento(&evento, "promocoes/keys/promocoes_private.pem")
+		if err != nil {
+			log.Printf("[ERRO] Falha na assinatura digital: %v", err)
+			continue
+		}
+
+		// 3. Serializa o envelope já assinado para formato JSON (bytes)
+		body, err := base.SerializarEvento(evento)
+		if err != nil {
+			log.Printf("[ERRO] Falha ao converter para bytes: %v", err)
+			continue
+		}
+
+		// 4. Publica na exchange utilizando a routing key do jogo sorteado
 		rabbitmq.PublicarEvento(ch, rabbitmq.ExchangePromocoes, routingKey, body)
 
 		// Pausa de 5 segundos antes do próximo sorteio
