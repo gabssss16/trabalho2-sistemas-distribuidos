@@ -129,7 +129,7 @@ func ListarProdutos() {
 
 func CriarPedido(ch *amqp.Channel, entrada *bufio.Scanner) error {
 	ListarProdutos()
-	quantos, err := lerInteiro(entrada, "Quantos itens deseja adicionar? ")
+	quantos, err := lerInteiro(entrada, "Quantos tipos de produto deseja adicionar? ")
 	if err != nil {
 		return err
 	}
