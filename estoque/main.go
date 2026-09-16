@@ -106,20 +106,20 @@ func processarPedidoExcluido(payload base.OrderPayload) {
 }
 
 func publicarResposta(ch *amqp.Channel, routingKey string, payload base.OrderPayload) {
-	// 1. Empacota
+	// Empacota
 	evento, err := base.CriarEvento(routingKey, "estoque", payload)
 	if err != nil {
 		log.Printf("[ESTOQUE - ERRO] Falha ao criar evento: %v", err)
 		return
 	}
 
-	// 2. Assina com a chave privada do Estoque
+	// Assina com a chave privada do Estoque
 	if err := base.AssinarEvento(&evento, "estoque/keys/estoque_private.pem"); err != nil {
 		log.Printf("[ESTOQUE - ERRO] Falha ao assinar evento: %v", err)
 		return
 	}
 
-	// 3. Serializa e publica
+	// Serializa e publica
 	body, err := base.SerializarEvento(evento)
 	if err != nil {
 		log.Printf("[ESTOQUE - ERRO] Falha ao serializar evento: %v", err)

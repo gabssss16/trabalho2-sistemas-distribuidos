@@ -29,21 +29,21 @@ func main() {
 	rabbitmq.VincularFila(ch, fila.Name, "promocao.categoria.B", rabbitmq.ExchangePromocoes)
 
 	handler := func(d amqp.Delivery) {
-		// 1. Abre o envelope padrão
+		// Abre o envelope padrão
 		evento, err := base.DesserializarEvento(d.Body)
 		if err != nil {
 			log.Printf("[C1 - ERRO] Falha ao ler envelope: %v", err)
 			return
 		}
 
-		// 2. Valida a assinatura usando a chave pública do produtor (Promoções)
+		// Valida a assinatura usando a chave pública do produtor 
 		valido, err := base.ValidarAssinatura(evento, "consumidor-c1/keys/promocoes_public.pem")
 		if err != nil || !valido {
 			log.Printf("[C1 - ALERTA] Evento descartado! Assinatura inválida: %v", err)
 			return
 		}
 
-		// 3. Extrai o conteúdo útil para a struct de Promoção
+		// Extrai o conteúdo útil para a struct 
 		var promo Promocao
 		err = base.DesserializarPayload(evento, &promo)
 		if err != nil {
