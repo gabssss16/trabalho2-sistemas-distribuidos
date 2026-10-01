@@ -1,13 +1,10 @@
 package main
 
 import (
-	"bufio"
+	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"os"
-	"strconv"
-	"strings"
+	"net/http"
 	"sync"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -23,9 +20,17 @@ type Pedido struct {
 	Status string
 }
 
-var produtos = []string{"Produto A", "Produto B", "Produto C"}
+// structs para requisição e resposta REST
+type CriarPedidoRequest struct {
+	Itens []base.OrderItem `json:"itens"`
+}
 
-// A mesma relação define os bindings e identifica quem pode enviar cada evento.
+type PedidoResponse struct {
+	OrderID int               `json:"order_id"`
+	Status  string            `json:"status"`
+	Links   map[string]string `json:"_links"` // Padrão HATEOAS
+}
+
 var produtores = map[string]string{
 	base.EstoqueOK:           "estoque",
 	base.EstoqueIndisponivel: "estoque",
@@ -37,154 +42,85 @@ var produtores = map[string]string{
 var (
 	pedidos   = make(map[int]Pedido)
 	proximoID = 1
-	mu        sync.Mutex // O menu e o consumidor acessam os mesmos pedidos.
+	mu        sync.Mutex
+	canalAMQP *amqp.Channel // var global para o servidor web conseguir publicar mensagens
 )
 
 func main() {
 	conn := rabbitmq.Conectar()
 	defer conn.Close()
 
-	ch := rabbitmq.AbrirCanal(conn)
-	defer ch.Close()
+	canalAMQP = rabbitmq.AbrirCanal(conn)
+	defer canalAMQP.Close()
 
-	rabbitmq.DeclararExchangeEcommerce(ch)
-	ConfigurarFilaPrincipal(ch)
-	rabbitmq.IniciarConsumo(ch, FilaPrincipal, func(delivery amqp.Delivery) {
-		TratarEvento(ch, delivery)
+	rabbitmq.DeclararExchangeEcommerce(canalAMQP)
+	ConfigurarFilaPrincipal(canalAMQP)
+	
+	// consumidor rodando em background 
+	rabbitmq.IniciarConsumo(canalAMQP, FilaPrincipal, func(delivery amqp.Delivery) {
+		TratarEvento(canalAMQP, delivery)
 	})
 
-	ExecutarMenu(ch)
+	// config do servidor rest
+	http.HandleFunc("/pedidos", gerenciarPedidos)
+
+	log.Println("[*] API Gateway (MS Principal) rodando na porta 8080...")
+	log.Fatal(http.ListenAndServe(":8080", nil)) // Fica escutando requisições infinitamente
 }
 
-func ExecutarMenu(ch *amqp.Channel) {
-	entrada := bufio.NewScanner(os.Stdin)
-	for {
-		fmt.Println("\n1 - Visualizar produtos\n2 - Realizar pedido\n3 - Excluir pedido\n4 - Consultar pedidos\n0 - Sair")
-		opcao, err := lerInteiro(entrada, "Opção: ")
-		if err == io.EOF {
-			return
-		}
-		if err != nil {
-			fmt.Println(err)
-			continue
-		}
-		switch opcao {
-		case 1:
-			ListarProdutos()
-		case 2:
-			err = CriarPedido(ch, entrada)
-		case 3:
-			var id int
-			id, err = lerInteiro(entrada, "ID do pedido: ")
-			if err == nil {
-				err = ExcluirPedido(ch, id)
-			}
-		case 4:
-			mu.Lock()
-			if len(pedidos) == 0 {
-				fmt.Println("Nenhum pedido cadastrado.")
-			}
-			for id := 1; id < proximoID; id++ {
-				pedido := pedidos[id]
-				fmt.Printf("Pedido %d | Status: %s\n", id, pedido.Status)
-				for _, item := range pedido.Itens {
-					fmt.Printf("  Produto %d | Quantidade: %d\n", item.ProductID, item.Quantity)
-				}
-			}
-			mu.Unlock()
-		case 0:
-			return
-		default:
-			fmt.Println("Opção inválida.")
-		}
-		if err == io.EOF {
-			return
-		}
-		if err != nil {
-			fmt.Println(err)
-		}
+//endpoints rest
+func gerenciarPedidos(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method == http.MethodPost {
+		handleCriarPedido(w, r)
+		return
 	}
+	
+	http.Error(w, "Método não permitido", http.StatusMethodNotAllowed)
 }
 
-func lerInteiro(entrada *bufio.Scanner, pergunta string) (int, error) {
-	fmt.Print(pergunta)
-	if !entrada.Scan() {
-		if err := entrada.Err(); err != nil {
-			return 0, err
-		}
-		return 0, io.EOF
+func handleCriarPedido(w http.ResponseWriter, r *http.Request) {
+	var req CriarPedidoRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "JSON inválido", http.StatusBadRequest)
+		return
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(entrada.Text()))
-	if err != nil {
-		return 0, fmt.Errorf("informe um número inteiro")
-	}
-	return n, nil
-}
 
-func ListarProdutos() {
-	for i, nome := range produtos {
-		fmt.Printf("%d - %s\n", i+1, nome)
-	}
-}
-
-func CriarPedido(ch *amqp.Channel, entrada *bufio.Scanner) error {
-	ListarProdutos()
-	quantos, err := lerInteiro(entrada, "Quantos tipos de produto deseja adicionar? ")
-	if err != nil {
-		return err
-	}
-	if quantos <= 0 {
-		return fmt.Errorf("o pedido deve ter pelo menos um item")
-	}
-	var itens []base.OrderItem
-	for i := 0; i < quantos; i++ {
-		id, err := lerInteiro(entrada, "ID do produto: ")
-		if err != nil {
-			return err
-		}
-		if id < 1 || id > len(produtos) {
-			return fmt.Errorf("produto não encontrado")
-		}
-		quantidade, err := lerInteiro(entrada, "Quantidade: ")
-		if err != nil {
-			return err
-		}
-		if quantidade <= 0 {
-			return fmt.Errorf("a quantidade deve ser positiva")
-		}
-		itens = append(itens, base.OrderItem{ProductID: id, Quantity: quantidade})
+	if len(req.Itens) == 0 {
+		http.Error(w, "O pedido deve ter pelo menos um item", http.StatusBadRequest)
+		return
 	}
 
 	mu.Lock()
-	defer mu.Unlock()
-	payload := base.OrderPayload{OrderID: proximoID, Items: itens}
-	if err := PublicarEventoPrincipal(ch, base.PedidoCriado, payload); err != nil {
-		return err
+	idAtual := proximoID
+	payload := base.OrderPayload{OrderID: idAtual, Items: req.Itens}
+	
+	// Publica no RabbitMQ reaproveitando sua função original
+	if err := PublicarEventoPrincipal(canalAMQP, base.PedidoCriado, payload); err != nil {
+		mu.Unlock()
+		http.Error(w, "Falha ao processar pedido", http.StatusInternalServerError)
+		return
 	}
-	pedidos[proximoID] = Pedido{Itens: itens, Status: base.PedidoCriado}
-	fmt.Printf("Pedido %d criado.\n", proximoID)
+
+	pedidos[idAtual] = Pedido{Itens: req.Itens, Status: base.PedidoCriado}
 	proximoID++
-	return nil
-}
+	mu.Unlock()
 
-func ExcluirPedido(ch *amqp.Channel, id int) error {
-	mu.Lock()
-	defer mu.Unlock()
-	pedido, existe := pedidos[id]
-	if !existe {
-		return fmt.Errorf("pedido não encontrado")
+	// Montando a resposta com HATEOAS
+	resposta := PedidoResponse{
+		OrderID: idAtual,
+		Status:  base.PedidoCriado,
+		Links: map[string]string{
+			"self":           fmt.Sprintf("/pedidos/%d", idAtual),
+			"cancelar":       fmt.Sprintf("/pedidos/%d/cancelar", idAtual),
+			"acompanhar_sse": fmt.Sprintf("/sse/pedidos/%d", idAtual),
+		},
 	}
-	if pedidoFinalizado(pedido.Status) {
-		return fmt.Errorf("pedido já enviado ou cancelado")
-	}
-	payload := base.OrderPayload{OrderID: id, Items: pedido.Itens}
-	if err := PublicarEventoPrincipal(ch, base.PedidoExcluido, payload); err != nil {
-		return err
-	}
-	pedido.Status = base.PedidoExcluido
-	pedidos[id] = pedido
-	fmt.Printf("Pedido %d excluído.\n", id)
-	return nil
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(resposta)
 }
 
 func ConfigurarFilaPrincipal(ch *amqp.Channel) {
