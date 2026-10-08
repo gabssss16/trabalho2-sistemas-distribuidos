@@ -1,10 +1,12 @@
 # trabalho2-sistemas-distribuidos
 
-Backend de um sistema de e-commerce baseado em microsserviços independentes. A comunicação é feita exclusivamente via mensageria (RabbitMQ) utilizando as exchanges `eCommerce` (Direct) e `Promoções` (Topic)[cite: 1]. Todos os eventos trafegados são assinados e validados via criptografia assimétrica RSA[cite: 1].
+Backend de um sistema de e-commerce baseado em microsserviços independentes. Os eventos usam RabbitMQ, com as exchanges `eCommerce` (Direct) e `Promoções` (Topic), e são assinados e validados via criptografia assimétrica RSA. Estoque e Pagamento também expõem APIs HTTP para consulta de produtos, checkout e webhook.
+
+Os serviços de **Estoque e Pagamento da Avaliação 3**, incluindo execução, persistência e contrato REST com o mock, estão documentados em [docs/estoque-pagamento.md](docs/estoque-pagamento.md).
 
 ## 1. Pré-requisitos
 
-* **Go** (versão 1.20 ou superior).
+* **Go** na versão indicada em `go.mod` (atualmente 1.27.1).
 * **RabbitMQ** rodando na porta padrão (5672).
 
 ## 2. Subindo o Servidor RabbitMQ
