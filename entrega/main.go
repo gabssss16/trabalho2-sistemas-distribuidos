@@ -3,77 +3,59 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 
 	amqp "github.com/rabbitmq/amqp091-go"
-
 	"trabalho2-sistemas-distribuidos/base"
 	"trabalho2-sistemas-distribuidos/base/rabbitmq"
 )
 
 func main() {
+	caminho := os.Getenv("ENTREGA_DATA_FILE")
+	if caminho == "" {
+		caminho = "entrega/data/entregas.json"
+	}
+	servico, err := abrirEntrega(caminho)
+	if err != nil {
+		log.Fatal(err)
+	}
 	conn := rabbitmq.Conectar()
 	defer conn.Close()
-
 	ch := rabbitmq.AbrirCanal(conn)
 	defer ch.Close()
-
 	rabbitmq.DeclararExchangeEcommerce(ch)
 	fila := rabbitmq.DeclararFila(ch, "fila.entrega")
 	rabbitmq.VincularFila(ch, fila.Name, base.PagamentoAprovado, rabbitmq.ExchangeEcommerce)
-
-	rabbitmq.IniciarConsumo(ch, fila.Name, func(delivery amqp.Delivery) {
-		resposta, err := ProcessarEntrega(delivery)
+	servico.publicar = rabbitmq.NovoPublicadorAssinado(conn, "entrega", "entrega/keys/entrega_private.pem")
+	rabbitmq.ConsumirConfirmado(ch, fila.Name, func(d amqp.Delivery) error {
+		pedido, err := lerPagamentoAprovado(d)
 		if err != nil {
-			log.Printf("[ENTREGA] Evento não processado: %v", err)
-			return
+			return err
 		}
-		body, err := base.SerializarEvento(resposta)
-		if err != nil {
-			log.Printf("[ENTREGA] Falha ao serializar resposta: %v", err)
-			return
-		}
-		rabbitmq.PublicarEvento(ch, rabbitmq.ExchangeEcommerce, resposta.Type, body)
+		return servico.enviar(pedido)
 	})
-
 	log.Println("[ENTREGA] Aguardando pagamentos aprovados. CTRL+C para sair.")
 	select {}
 }
 
-// ProcessarEntrega valida o pagamento, simula a entrega e assina pedido.enviado.
-func ProcessarEntrega(delivery amqp.Delivery) (base.Event, error) {
-	evento, err := base.DesserializarEvento(delivery.Body)
+func lerPagamentoAprovado(d amqp.Delivery) (base.OrderPayload, error) {
+	var pedido base.OrderPayload
+	evento, err := base.DesserializarEvento(d.Body)
 	if err != nil {
-		return base.Event{}, err
+		return pedido, fmt.Errorf("%w: envelope", rabbitmq.ErrEventoInvalido)
 	}
-	if evento.Type != base.PagamentoAprovado || delivery.RoutingKey != base.PagamentoAprovado || evento.Producer != "pagamento" {
-		return base.Event{}, fmt.Errorf("esperado pagamento.aprovado do produtor pagamento")
+	if evento.Type != base.PagamentoAprovado || d.RoutingKey != base.PagamentoAprovado || evento.Producer != "pagamento" {
+		return pedido, fmt.Errorf("%w: esperado pagamento.aprovado do pagamento", rabbitmq.ErrEventoInvalido)
 	}
-	valida, err := base.ValidarAssinatura(evento, "entrega/keys/pagamento_public.pem")
-	if err != nil {
-		return base.Event{}, err
+	ok, err := base.ValidarAssinatura(evento, "entrega/keys/pagamento_public.pem")
+	if err != nil || !ok {
+		return pedido, fmt.Errorf("%w: assinatura", rabbitmq.ErrEventoInvalido)
 	}
-	if !valida {
-		return base.Event{}, fmt.Errorf("assinatura inválida")
+	if err := base.DesserializarPayload(evento, &pedido); err != nil {
+		return pedido, fmt.Errorf("%w: payload", rabbitmq.ErrEventoInvalido)
 	}
-
-	var payload base.OrderPayload
-	if err := base.DesserializarPayload(evento, &payload); err != nil {
-		return base.Event{}, err
+	if err := validarPedido(pedido); err != nil {
+		return pedido, err
 	}
-	if payload.OrderID <= 0 {
-		return base.Event{}, fmt.Errorf("identificador do pedido inválido")
-	}
-
-	// A emissão da nota e a preparação da entrega são simuladas no terminal.
-	log.Printf("[ENTREGA] Nota do pedido %d emitida (simulação).", payload.OrderID)
-	log.Printf("[ENTREGA] Pedido %d preparado para envio (simulação).", payload.OrderID)
-
-	resposta, err := base.CriarEvento(base.PedidoEnviado, "entrega", payload)
-	if err != nil {
-		return base.Event{}, err
-	}
-	if err := base.AssinarEvento(&resposta, "entrega/keys/entrega_private.pem"); err != nil {
-		return base.Event{}, err
-	}
-	return resposta, nil
+	return pedido, nil
 }

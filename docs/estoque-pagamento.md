@@ -19,10 +19,8 @@ PAGAMENTO_WEBHOOK_URL=http://localhost:8082/webhook \
 go run ./pagamento
 ```
 
-A implementação de cada serviço está reunida em seu `main.go`. Na raiz do repositório, também é possível executar `go run estoque/main.go` e `go run pagamento/main.go`.
-O Mock de Pagamento é um componente separado: estes comandos não o iniciam.
-Gateway REST, frontend, SSE e a página do mock continuam a cargo dos demais componentes do trabalho.
-O MS Principal existente ainda utiliza o menu de terminal.
+O Mock de Pagamento agora está disponível em `mock-pagamento` e deve ser iniciado separadamente com `go run ./mock-pagamento`. O fluxo completo, incluindo Entrega, está em [entrega-pagamento.md](entrega-pagamento.md).
+O Principal de `main-t2` já cria pedidos via REST; frontend, consulta do checkout pelo Gateway e SSE ainda precisam ser integrados.
 
 | Variável | Padrão | Uso |
 | --- | --- | --- |
@@ -138,7 +136,7 @@ Para recusar, envie `"status":"RECUSADO"`.
 | 409 | Cobrança não corresponde ao pedido, ou resultado final contraditório |
 | 503 | Falha de persistência/publicação: o mock deve repetir o mesmo webhook |
 
-O resultado fica persistido antes da publicação. Se a publicação falhar, o reenvio do webhook retoma a operação, inclusive depois de reiniciar Pagamento.
+O resultado fica persistido antes da publicação. Se a publicação falhar, o reenvio do webhook retoma a operação, inclusive depois de reiniciar Pagamento. O serviço também retoma resultados pendentes automaticamente na inicialização e a cada cinco segundos.
 O endpoint é destinado ao mock no ambiente do trabalho; o `charge_id` correlaciona a cobrança e não constitui autenticação criptográfica do provedor.
 
 ## Eventos e garantias
@@ -159,7 +157,7 @@ As filas dos consumidores precisam ser declaradas antes de produzir os eventos, 
 A entrega é pelo menos uma vez: uma queda entre publicar e salvar/confirmar pode repetir o evento; consumidores devem tratar duplicatas. Não há transação distribuída entre arquivo e broker.
 Se a conexão com RabbitMQ encerrar, reinicie o serviço. Em falhas de publicação do webhook, o mock precisa repetir a chamada até receber 204.
 
-Os IDs de pedidos precisam ser únicos ao longo dos reinícios. O menu antigo do Principal reinicia sua contagem em 1; o futuro Gateway deve persistir/gerar IDs únicos para trabalhar com o histórico destes serviços.
+Os IDs de pedidos precisam ser únicos ao longo dos reinícios. O Gateway atual reinicia sua contagem em 1; ele ainda precisa persistir/gerar IDs únicos para trabalhar com o histórico destes serviços.
 
 ## Validação
 

@@ -180,3 +180,45 @@ func TestWebhookRetomaPublicacaoAposFalhaEReinicio(t *testing.T) {
 		t.Fatal("resultado não retomado")
 	}
 }
+
+func TestRetomaResultadoPersistidoSemNovoWebhook(t *testing.T) {
+	for status, tipo := range map[string]string{"APROVADO": base.PagamentoAprovado, "RECUSADO": base.PagamentoRecusado} {
+		t.Run(status, func(t *testing.T) {
+			s := novoPagamento(t, "http://mock/cobrancas")
+			if err := s.salvarCobranca(cobranca{Pedido: pedidoTeste(), ChargeID: "c7", Status: status}); err != nil {
+				t.Fatal(err)
+			}
+			reiniciado, err := abrirPagamento(s.caminho, s.mockURL, s.webhookURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reiniciado.publicar = func(string, base.OrderPayload) error { return fmt.Errorf("broker indisponível") }
+			reiniciado.retomarPendentes()
+			if reiniciado.cobrancas[7].Publicado {
+				t.Fatal("confirmou falha")
+			}
+			chamadas := 0
+			reiniciado.publicar = func(evento string, p base.OrderPayload) error {
+				chamadas++
+				if evento != tipo || !pedidosIguais(p, pedidoTeste()) {
+					t.Fatal("evento incorreto")
+				}
+				return nil
+			}
+			reiniciado.retomarPendentes()
+			reiniciado.retomarPendentes()
+			if chamadas != 1 || !reiniciado.cobrancas[7].Publicado {
+				t.Fatal("não recuperou resultado uma única vez")
+			}
+		})
+	}
+}
+
+func TestRetomadaNaoAprovaCobrancaPendente(t *testing.T) {
+	s := novoPagamento(t, "http://mock/cobrancas")
+	if err := s.salvarCobranca(cobranca{Pedido: pedidoTeste(), ChargeID: "c7", Status: "PENDENTE"}); err != nil {
+		t.Fatal(err)
+	}
+	s.publicar = func(string, base.OrderPayload) error { t.Fatal("publicou antes da decisão do usuário"); return nil }
+	s.retomarPendentes()
+}
