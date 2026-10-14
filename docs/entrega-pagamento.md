@@ -87,7 +87,7 @@ Os arquivos JSON são substituídos de forma atômica, ficam fora do Git e são 
 
 A branch preserva o Gateway de `main-t2`. Ele ainda precisa implementar consulta de checkout pelo frontend, consulta de produtos e SSE; os links apresentados na criação do pedido não significam que esses endpoints já estejam implementados. A consulta direta a Pagamento acima permite testar estes componentes enquanto essa integração é concluída.
 
-O Gateway também mantém os pedidos e o contador de IDs apenas em memória. Reiniciar o Gateway com históricos persistidos pode reutilizar IDs: a camada de Gateway precisa persistir/gerar identificadores únicos antes de usar esse fluxo continuamente. A implementação de frontend, SSE e Promoções não faz parte desta mudança.
+O Gateway também mantém os pedidos e o contador de IDs apenas em memória. Reiniciar o Gateway com históricos persistidos pode reutilizar IDs: a camada de Gateway precisa persistir/gerar identificadores únicos antes de usar esse fluxo continuamente. Frontend e SSE continuam pendentes de integração. O MS Promoções foi implementado em um commit posterior; veja [promocoes.md](promocoes.md) para configurar o e-mail e integrar inscrições/cancelamentos no Gateway.
 
 ## Validação automatizada
 

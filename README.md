@@ -6,6 +6,8 @@ Os serviços de **Estoque e Pagamento da Avaliação 3**, incluindo execução, 
 
 O fluxo de **Pagamento, Mock de checkout e Entrega**, com execução e roteiro de teste, está em [docs/entrega-pagamento.md](docs/entrega-pagamento.md).
 
+O **MS Promoções**, o contrato de inscrições/cancelamentos com o Principal e a configuração da API de e-mail estão em [docs/promocoes.md](docs/promocoes.md).
+
 ## 1. Pré-requisitos
 
 * **Go** na versão indicada em `go.mod` (atualmente 1.27.1).

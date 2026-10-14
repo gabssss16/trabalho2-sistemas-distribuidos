@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"log"
 	"math/rand"
+	"os"
 	"time"
 
 	"trabalho2-sistemas-distribuidos/base"
@@ -47,48 +50,73 @@ func sortearPromocao() Promocao {
 }
 
 func main() {
-	// Conecta e abre canal usando as ferramentas da pasta base
+	intervalo, err := time.ParseDuration(config("PROMOCOES_INTERVALO", "5m"))
+	if err != nil || intervalo <= 0 {
+		log.Fatal("PROMOCOES_INTERVALO deve ser uma duração positiva (ex.: 5m)")
+	}
+	remetente := os.Getenv("PROMOCOES_EMAIL_FROM")
+	email, err := novoClienteEmail(os.Getenv("RESEND_API_KEY"), remetente)
+	if err != nil {
+		log.Fatal(err)
+	}
+	servico, err := abrirPromocoes(config("PROMOCOES_DATA_FILE", "promocoes/data/promocoes.json"), remetente)
+	if err != nil {
+		log.Fatal(err)
+	}
+	servico.enviar = email.enviar
+
 	conn := rabbitmq.Conectar()
 	defer conn.Close()
-
 	ch := rabbitmq.AbrirCanal(conn)
 	defer ch.Close()
-
-	// Garante que a exchange "Promoções" existe antes de publicar
-	rabbitmq.DeclararExchangePromocoes(ch)
-
-	log.Println("[*] MS Promoções rodando. Publicando ofertas a cada 5 segundos... CTRL+C para sair")
-
-	// Loop infinito gerando promoções
-	for {
-		novaPromocao := sortearPromocao()
-		routingKey := "promocao.categoria." + novaPromocao.Categoria
-
-		// Cria o envelope no padrão esperado por todo o sistema
-		evento, err := base.CriarEvento(routingKey, "promocoes", novaPromocao)
+	publicador := rabbitmq.AbrirCanal(conn)
+	defer publicador.Close()
+	rabbitmq.DeclararExchangeEcommerce(ch)
+	rabbitmq.DeclararExchangePromocoes(publicador)
+	fila := rabbitmq.DeclararFila(ch, "fila.promocoes.interesses")
+	rabbitmq.VincularFila(ch, fila.Name, base.InteressePromocao, rabbitmq.ExchangeEcommerce)
+	rabbitmq.ConsumirConfirmado(ch, fila.Name, func(d amqp.Delivery) error {
+		interesse, err := lerInteresse(d)
 		if err != nil {
-			log.Printf("[ERRO] Falha ao empacotar evento: %v", err)
+			return err
+		}
+		return servico.atualizarInteresse(interesse)
+	})
+
+	ctx := context.Background()
+	go servico.repetirPendentes(ctx)
+	log.Printf("[PROMOÇÕES] Consumindo interesses; novas ofertas a cada %s", intervalo)
+	ticker := time.NewTicker(intervalo)
+	defer ticker.Stop()
+	for range ticker.C {
+		promocao := sortearPromocao()
+		if err := servico.agendar(promocao); err != nil {
+			log.Printf("[PROMOÇÕES] Falha ao registrar oferta: %v", err)
 			continue
 		}
-
-		// Assina o evento utilizando a chave privada gerada na pasta correta
-		err = base.AssinarEvento(&evento, "promocoes/keys/promocoes_private.pem")
+		// Mantém o contrato Topic dos consumidores C1 e C2 do trabalho anterior.
+		routingKey := "promocao.categoria." + promocao.Categoria
+		evento, err := base.CriarEvento(routingKey, "promocoes", promocao)
 		if err != nil {
-			log.Printf("[ERRO] Falha na assinatura digital: %v", err)
+			log.Printf("[PROMOÇÕES] Evento: %v", err)
 			continue
 		}
-
-		// Serializa o envelope já assinado para formato JSON (bytes)
+		if err := base.AssinarEvento(&evento, "promocoes/keys/promocoes_private.pem"); err != nil {
+			log.Printf("[PROMOÇÕES] Assinatura: %v", err)
+			continue
+		}
 		body, err := base.SerializarEvento(evento)
 		if err != nil {
-			log.Printf("[ERRO] Falha ao converter para bytes: %v", err)
+			log.Printf("[PROMOÇÕES] Serialização: %v", err)
 			continue
 		}
-
-		// Publica na exchange utilizando a routing key do jogo sorteado
-		rabbitmq.PublicarEvento(ch, rabbitmq.ExchangePromocoes, routingKey, body)
-
-		// Pausa de 5 segundos antes do próximo sorteio
-		time.Sleep(5 * time.Second)
+		rabbitmq.PublicarEvento(publicador, rabbitmq.ExchangePromocoes, routingKey, body)
 	}
+}
+
+func config(nome, padrao string) string {
+	if valor := os.Getenv(nome); valor != "" {
+		return valor
+	}
+	return padrao
 }
