@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
@@ -34,6 +35,12 @@ type PedidoResponse struct {
 	Links   map[string]string `json:"_links"` // Padrão HATEOAS
 }
 
+// estrutura pra receber o JSON de interesse em promoções 
+type InteresseRequest struct {
+	Email      string   `json:"email"`
+	Categorias []string `json:"categorias"` // Ex: ["A", "B"]
+}
+
 var produtores = map[string]string{
 	base.EstoqueOK:           "estoque",
 	base.EstoqueIndisponivel: "estoque",
@@ -47,11 +54,8 @@ var (
 	proximoID = 1
 	mu        sync.Mutex
 	canalAMQP *amqp.Channel // var global para o servidor web conseguir publicar mensagens
-)
-
-var (
 	clientesSSE = make(map[int]chan string) // Mapa: OrderID -> Canal de mensagens de status
-	muSSE       sync.Mutex                 // Protege o mapa de clientes SSE
+	muSSE       sync.Mutex    
 )
 
 func main() {
@@ -73,6 +77,9 @@ func main() {
 	http.HandleFunc("/pedidos", gerenciarPedidos)
 	http.HandleFunc("/sse/pedidos/", handleSSE)
 	http.HandleFunc("/produtos", handleListarProdutos)
+	http.HandleFunc("POST /pedidos/{id}/cancelar", handleCancelarPedido)
+	http.HandleFunc("POST /interesse", handleRegistrarInteresse)
+	http.HandleFunc("DELETE /interesse", handleCancelarInteresse)
 
 	log.Println("[*] API Gateway (MS Principal) rodando na porta 8080...")
 	log.Fatal(http.ListenAndServe(":8080", nil)) // Fica escutando requisições infinitamente
@@ -288,4 +295,122 @@ func handleListarProdutos(w http.ResponseWriter, r *http.Request) {
 
 	// Copia o corpo da resposta (o JSON inteiro com os produtos) diretamente para o Frontend
 	io.Copy(w, resp.Body)
+}
+
+func handleCancelarPedido(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	
+	// Pega o ID da URL (recurso do Go 1.22+)
+	idStr := r.PathValue("id")
+	orderID, err := strconv.Atoi(idStr)
+	if err != nil || orderID <= 0 {
+		http.Error(w, "ID inválido", http.StatusBadRequest)
+		return
+	}
+
+	mu.Lock()
+	pedido, existe := pedidos[orderID]
+	if !existe {
+		mu.Unlock()
+		http.Error(w, "Pedido não encontrado", http.StatusNotFound)
+		return
+	}
+	if pedidoFinalizado(pedido.Status) {
+		mu.Unlock()
+		http.Error(w, "Pedido já enviado ou cancelado", http.StatusConflict)
+		return
+	}
+
+	// Monta o evento de exclusão e publica no RabbitMQ
+	payload := base.OrderPayload{OrderID: orderID, Items: pedido.Itens}
+	if err := PublicarEventoPrincipal(canalAMQP, base.PedidoExcluido, payload); err != nil {
+		mu.Unlock()
+		http.Error(w, "Falha ao publicar cancelamento", http.StatusInternalServerError)
+		return
+	}
+
+	// Atualiza a memória
+	pedido.Status = base.PedidoExcluido
+	pedidos[orderID] = pedido
+	mu.Unlock()
+
+	// Avisa o cliente no SSE
+	muSSE.Lock()
+	if canal, online := clientesSSE[orderID]; online {
+		canal <- base.PedidoExcluido
+	}
+	muSSE.Unlock()
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `{"message": "Pedido %d cancelado com sucesso"}`, orderID)
+}
+
+func handleRegistrarInteresse(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+
+	var req InteresseRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "JSON inválido", http.StatusBadRequest)
+		return
+	}
+
+	// Usa o tempo atual como versão (milissegundos) para garantir a ordem dos eventos
+	payload := base.InteressePromocaoPayload{
+		Email:      req.Email,
+		Categorias: req.Categorias,
+		Acao:       "cadastrar",
+		Versao:     time.Now().UnixMilli(), 
+	}
+
+	if err := PublicarInteressePrincipal(canalAMQP, payload); err != nil {
+		http.Error(w, "Falha ao registrar interesse", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusCreated)
+	fmt.Fprintf(w, `{"message": "Interesse cadastrado com sucesso"}`)
+}
+
+func handleCancelarInteresse(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+
+	var req InteresseRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "JSON inválido", http.StatusBadRequest)
+		return
+	}
+
+	payload := base.InteressePromocaoPayload{
+		Email:      req.Email,
+		Categorias: req.Categorias, // Pode ser vazio se for cancelar tudo, ou específico para cancelar uma só
+		Acao:       "cancelar",
+		Versao:     time.Now().UnixMilli(),
+	}
+
+	if err := PublicarInteressePrincipal(canalAMQP, payload); err != nil {
+		http.Error(w, "Falha ao cancelar interesse", http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `{"message": "Interesse cancelado com sucesso"}`)
+}
+
+// PublicarInteressePrincipal assina e publica especificamente o payload de promoções
+func PublicarInteressePrincipal(ch *amqp.Channel, payload base.InteressePromocaoPayload) error {
+	evento, err := base.CriarEvento(base.InteressePromocao, "principal", payload)
+	if err != nil {
+		return err
+	}
+	if err := base.AssinarEvento(&evento, "principal/keys/principal_private.pem"); err != nil {
+		return err
+	}
+	body, err := base.SerializarEvento(evento)
+	if err != nil {
+		return err
+	}
+	rabbitmq.PublicarEvento(ch, rabbitmq.ExchangeEcommerce, base.InteressePromocao, body)
+	return nil
 }

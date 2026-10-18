@@ -38,6 +38,7 @@ func main() {
 	fila := rabbitmq.DeclararFila(ch, "fila.pagamento")
 	rabbitmq.VincularFila(ch, fila.Name, base.EstoqueOK, rabbitmq.ExchangeEcommerce)
 	servico.publicar = rabbitmq.NovoPublicadorAssinado(conn, "pagamento", "pagamento/keys/pagamento_private.pem")
+	go servico.republicarPendentes(context.Background())
 	rabbitmq.ConsumirConfirmado(ch, fila.Name, func(d amqp.Delivery) error {
 		pedido, err := lerPedidoEstoque(d)
 		if err != nil {
@@ -120,6 +121,13 @@ func abrirPagamento(caminho, mockURL, webhookURL string) (*servicoPagamento, err
 	}
 	if s.cobrancas == nil {
 		return nil, fmt.Errorf("arquivo de cobranças inválido")
+	}
+	for id, c := range s.cobrancas {
+		if id <= 0 || id != c.Pedido.OrderID || c.ChargeID == "" ||
+			(c.Status != "PENDENTE" && c.Status != "APROVADO" && c.Status != "RECUSADO") ||
+			(c.Status == "PENDENTE" && c.Publicado) {
+			return nil, fmt.Errorf("cobrança %d inválida no arquivo", id)
+		}
 	}
 	return s, nil
 }
@@ -283,14 +291,9 @@ func (s *servicoPagamento) receberWebhook(w http.ResponseWriter, r *http.Request
 		responderErro(w, 503, "falha ao persistir resultado; repita o webhook")
 		return
 	}
-	if err := s.publicar(tipo, c.Pedido); err != nil {
+	if err := s.publicarResultado(c, tipo); err != nil {
 		log.Printf("[PAGAMENTO] Falha ao publicar pedido %d: %v", c.Pedido.OrderID, err)
-		responderErro(w, 503, "falha ao publicar resultado; repita o webhook")
-		return
-	}
-	c.Publicado = true
-	if err := s.salvarCobranca(c); err != nil {
-		responderErro(w, 503, "falha ao persistir confirmação; repita o webhook")
+		responderErro(w, 503, "resultado salvo; publicação pendente, repita o webhook")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -304,4 +307,44 @@ func responderJSON(w http.ResponseWriter, status int, valor any) {
 
 func responderErro(w http.ResponseWriter, status int, mensagem string) {
 	responderJSON(w, status, map[string]string{"error": mensagem})
+}
+
+// Quem chama mantém o mutex. 
+func (s *servicoPagamento) publicarResultado(c cobranca, tipo string) error {
+	if err := s.publicar(tipo, c.Pedido); err != nil {
+		return err
+	}
+	c.Publicado = true
+	return s.salvarCobranca(c)
+}
+
+func (s *servicoPagamento) retomarPendentes() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, c := range s.cobrancas {
+		if c.Publicado || c.Status == "PENDENTE" {
+			continue
+		}
+		tipo := base.PagamentoAprovado
+		if c.Status == "RECUSADO" {
+			tipo = base.PagamentoRecusado
+		}
+		if err := s.publicarResultado(c, tipo); err != nil {
+			log.Printf("[PAGAMENTO] Resultado pendente do pedido %d: %v", c.Pedido.OrderID, err)
+		}
+	}
+}
+
+func (s *servicoPagamento) republicarPendentes(ctx context.Context) {
+	s.retomarPendentes()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.retomarPendentes()
+		}
+	}
 }

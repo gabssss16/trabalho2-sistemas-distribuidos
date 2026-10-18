@@ -21,59 +21,55 @@ func main() {
 	fila := rabbitmq.DeclararFila(ch, "fila.entrega")
 	rabbitmq.VincularFila(ch, fila.Name, base.PagamentoAprovado, rabbitmq.ExchangeEcommerce)
 
-	rabbitmq.IniciarConsumo(ch, fila.Name, func(delivery amqp.Delivery) {
-		resposta, err := ProcessarEntrega(delivery)
+	// Instancia o publicador "Sedex com AR" criado pela sua dupla
+	publicar := rabbitmq.NovoPublicadorAssinado(conn, "entrega", "entrega/keys/entrega_private.pem")
+
+	// Usa o consumidor "Sedex com AR" criado pela sua dupla
+	rabbitmq.ConsumirConfirmado(ch, fila.Name, func(delivery amqp.Delivery) error {
+		pedido, err := ProcessarPagamentoAprovado(delivery)
 		if err != nil {
-			log.Printf("[ENTREGA] Evento não processado: %v", err)
-			return
+			return err // Se der erro, o Confiavel.go devolve a mensagem pra fila
 		}
-		body, err := base.SerializarEvento(resposta)
-		if err != nil {
-			log.Printf("[ENTREGA] Falha ao serializar resposta: %v", err)
-			return
-		}
-		rabbitmq.PublicarEvento(ch, rabbitmq.ExchangeEcommerce, resposta.Type, body)
+
+		// Publica o evento de pedido enviado
+		return publicar(base.PedidoEnviado, pedido)
 	})
 
 	log.Println("[ENTREGA] Aguardando pagamentos aprovados. CTRL+C para sair.")
 	select {}
 }
 
-// ProcessarEntrega valida o pagamento, simula a entrega e assina pedido.enviado.
-func ProcessarEntrega(delivery amqp.Delivery) (base.Event, error) {
+// ProcessarPagamentoAprovado valida o evento e simula a nota fiscal.
+func ProcessarPagamentoAprovado(delivery amqp.Delivery) (base.OrderPayload, error) {
+	var pedido base.OrderPayload
+
 	evento, err := base.DesserializarEvento(delivery.Body)
 	if err != nil {
-		return base.Event{}, err
+		return pedido, fmt.Errorf("%w: envelope", rabbitmq.ErrEventoInvalido)
 	}
+
 	if evento.Type != base.PagamentoAprovado || delivery.RoutingKey != base.PagamentoAprovado || evento.Producer != "pagamento" {
-		return base.Event{}, fmt.Errorf("esperado pagamento.aprovado do produtor pagamento")
+		return pedido, fmt.Errorf("%w: esperado pagamento.aprovado", rabbitmq.ErrEventoInvalido)
 	}
+
 	valida, err := base.ValidarAssinatura(evento, "entrega/keys/pagamento_public.pem")
-	if err != nil {
-		return base.Event{}, err
-	}
-	if !valida {
-		return base.Event{}, fmt.Errorf("assinatura inválida")
+	if err != nil || !valida {
+		return pedido, fmt.Errorf("%w: assinatura inválida", rabbitmq.ErrEventoInvalido)
 	}
 
-	var payload base.OrderPayload
-	if err := base.DesserializarPayload(evento, &payload); err != nil {
-		return base.Event{}, err
-	}
-	if payload.OrderID <= 0 {
-		return base.Event{}, fmt.Errorf("identificador do pedido inválido")
+	if err := base.DesserializarPayload(evento, &pedido); err != nil {
+		return pedido, fmt.Errorf("%w: payload", rabbitmq.ErrEventoInvalido)
 	}
 
-	// A emissão da nota e a preparação da entrega são simuladas no terminal.
-	log.Printf("[ENTREGA] Nota do pedido %d emitida (simulação).", payload.OrderID)
-	log.Printf("[ENTREGA] Pedido %d preparado para envio (simulação).", payload.OrderID)
+	if pedido.OrderID <= 0 {
+		return pedido, fmt.Errorf("%w: identificador do pedido inválido", rabbitmq.ErrEventoInvalido)
+	}
 
-	resposta, err := base.CriarEvento(base.PedidoEnviado, "entrega", payload)
-	if err != nil {
-		return base.Event{}, err
-	}
-	if err := base.AssinarEvento(&resposta, "entrega/keys/entrega_private.pem"); err != nil {
-		return base.Event{}, err
-	}
-	return resposta, nil
+	// === SIMULAÇÃO BÁSICA DE NOTA FISCAL ===
+	notaFiscal := fmt.Sprintf("NF-SIM-%d", pedido.OrderID)
+	rastreio := fmt.Sprintf("ENVIO-SIM-%d", pedido.OrderID)
+	
+	log.Printf("[ENTREGA] Pedido %d preparado! Nota: %s | Rastreio: %s", pedido.OrderID, notaFiscal, rastreio)
+
+	return pedido, nil
 }
