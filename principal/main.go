@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -46,6 +49,11 @@ var (
 	canalAMQP *amqp.Channel // var global para o servidor web conseguir publicar mensagens
 )
 
+var (
+	clientesSSE = make(map[int]chan string) // Mapa: OrderID -> Canal de mensagens de status
+	muSSE       sync.Mutex                 // Protege o mapa de clientes SSE
+)
+
 func main() {
 	conn := rabbitmq.Conectar()
 	defer conn.Close()
@@ -63,6 +71,8 @@ func main() {
 
 	// config do servidor rest
 	http.HandleFunc("/pedidos", gerenciarPedidos)
+	http.HandleFunc("/sse/pedidos/", handleSSE)
+	http.HandleFunc("/produtos", handleListarProdutos)
 
 	log.Println("[*] API Gateway (MS Principal) rodando na porta 8080...")
 	log.Fatal(http.ListenAndServe(":8080", nil)) // Fica escutando requisições infinitamente
@@ -173,6 +183,12 @@ func TratarEvento(ch *amqp.Channel, delivery amqp.Delivery) {
 	pedido.Status = evento.Type
 	pedidos[payload.OrderID] = pedido
 	fmt.Printf("\nPedido %d: %s\n", payload.OrderID, pedido.Status)
+
+	muSSE.Lock()
+	if canal, online := clientesSSE[payload.OrderID]; online {
+		canal <- pedido.Status // Joga o novo status dentro do canal transmissor
+	}
+	muSSE.Unlock()
 }
 
 func pedidoFinalizado(status string) bool {
@@ -194,4 +210,82 @@ func PublicarEventoPrincipal(ch *amqp.Channel, tipo string, payload base.OrderPa
 	}
 	rabbitmq.PublicarEvento(ch, rabbitmq.ExchangeEcommerce, tipo, body)
 	return nil
+}
+
+func handleSSE(w http.ResponseWriter, r *http.Request) {
+	// Pega o ID do pedido na URL (ex: /sse/pedidos/7)
+	idStr := strings.TrimPrefix(r.URL.Path, "/sse/pedidos/")
+	orderID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "ID inválido", http.StatusBadRequest)
+		return
+	}
+
+	// Cabeçalhos OBRIGATÓRIOS para o navegador entender que é um streaming de texto, e não um site normal
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Cria o "rádio transmissor" (um canal do Go) para este cliente específico
+	msgChan := make(chan string)
+
+	muSSE.Lock()
+	clientesSSE[orderID] = msgChan
+	muSSE.Unlock()
+
+	// Quando o cliente fechar a aba do navegador, limpa a memória
+	defer func() {
+		muSSE.Lock()
+		delete(clientesSSE, orderID)
+		muSSE.Unlock()
+		close(msgChan)
+	}()
+
+	// Manda o status atual imediatamente quando ele conecta
+	mu.Lock()
+	if pedido, existe := pedidos[orderID]; existe {
+		fmt.Fprintf(w, "data: %s\n\n", pedido.Status)
+		w.(http.Flusher).Flush() // Empurra fisicamente os dados pelo cabo da internet na hora
+	}
+	mu.Unlock()
+
+	// Loop infinito esperando o RabbitMQ avisar de mudanças
+	for {
+		select {
+		case novoStatus := <-msgChan:
+			// Recebeu novidade do RabbitMQ! Empurra pro navegador.
+			fmt.Fprintf(w, "data: %s\n\n", novoStatus)
+			w.(http.Flusher).Flush()
+		case <-r.Context().Done():
+			// Cliente cancelou a requisição (fechou o site)
+			return
+		}
+	}
+}
+
+func handleListarProdutos(w http.ResponseWriter, r *http.Request) {
+	// Libera o CORS para o Frontend conseguir acessar
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodGet {
+		http.Error(w, "Método não permitido", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Faz a requisição REST HTTP GET para o microsserviço de Estoque (que roda na porta 8081)
+	resp, err := http.Get("http://localhost:8081/produtos")
+	if err != nil {
+		log.Printf("[GATEWAY] Falha ao consultar MS Estoque: %v", err)
+		http.Error(w, "Serviço de estoque indisponível", http.StatusServiceUnavailable) // Erro 503
+		return
+	}
+	defer resp.Body.Close()
+
+	// Repassa o mesmo Status Code que o Estoque respondeu (ex: 200 OK)
+	w.WriteHeader(resp.StatusCode)
+
+	// Copia o corpo da resposta (o JSON inteiro com os produtos) diretamente para o Frontend
+	io.Copy(w, resp.Body)
 }
