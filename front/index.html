@@ -5,51 +5,112 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Loja de Games - Sistemas Distribuídos</title>
     <style>
-        body { font-family: Arial, sans-serif; background: #f4f4f9; padding: 20px; }
+        body { font-family: Arial, sans-serif; background: #f4f4f9; padding: 20px; color: #333; }
         .card { background: white; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        button { padding: 10px 15px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button { padding: 10px 15px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
         button:hover { background: #0056b3; }
-        .produto { border-bottom: 1px solid #eee; padding: 10px 0; display: flex; justify-content: space-between; }
+        button.btn-danger { background: #dc3545; }
+        button.btn-danger:hover { background: #c82333; }
+        .produto { border-bottom: 1px solid #eee; padding: 10px 0; display: flex; justify-content: space-between; align-items: center; }
         #status-container { background: #e2e8f0; padding: 15px; border-radius: 8px; margin-top: 15px; display: none; }
+        .form-group { margin-bottom: 10px; }
+        input[type="email"] { padding: 8px; width: 100%; max-width: 300px; border: 1px solid #ccc; border-radius: 4px; }
+        .categorias { margin: 10px 0; }
     </style>
 </head>
 <body>
 
     <h1>🎮 Loja de Games UTFPR</h1>
 
-    <!-- SEÇÃO 1: CATÁLOGO DE PRODUTOS -->
+    <!-- SEÇÃO 1: INSCRIÇÃO EM PROMOÇÕES -->
+    <div class="card">
+        <h2>Clube de Promoções</h2>
+        <p>Receba ofertas exclusivas com até 50% de desconto!</p>
+        
+        <div class="form-group">
+            <input type="email" id="email-promo" placeholder="Seu melhor e-mail (ex: namie@email.com)">
+        </div>
+        
+        <div class="categorias">
+            <label><input type="checkbox" value="A" class="cat-checkbox"> Categoria A (Ação/Aventura)</label><br>
+            <label><input type="checkbox" value="B" class="cat-checkbox"> Categoria B (RPG/Sobrevivência)</label><br>
+            <label><input type="checkbox" value="C" class="cat-checkbox"> Categoria C (Tiro/Competitivo)</label>
+        </div>
+        
+        <button onclick="gerenciarInteresse('POST')">Cadastrar Interesse</button>
+        <button class="btn-danger" onclick="gerenciarInteresse('DELETE')">Cancelar Inscrição</button>
+    </div>
+
+    <!-- SEÇÃO 2: CATÁLOGO DE PRODUTOS -->
     <div class="card">
         <h2>Catálogo de Produtos</h2>
         <div id="lista-produtos">Carregando catálogo...</div>
     </div>
 
-    <!-- SEÇÃO 2: ACOMPANHAMENTO DO PEDIDO (SSE) -->
+    <!-- SEÇÃO 3: ACOMPANHAMENTO DO PEDIDO (SSE) -->
     <div class="card" id="status-container">
         <h2>Status do Pedido <span id="numero-pedido"></span></h2>
         <h3 id="status-texto" style="color: #0056b3;">Aguardando...</h3>
-        <p id="area-pagamento"></p> <!-- Aqui vai aparecer o botão pro Mock -->
+        <p id="area-pagamento"></p>
     </div>
 
     <script>
         const API_URL = "http://localhost:8080";
-        let eventoSSE = null; // Guarda a conexão de rádio do SSE
+        let eventoSSE = null;
 
-        // 1. CARREGAR OS PRODUTOS VIA REST
+        // --- PROMOÇÕES ---
+        async function gerenciarInteresse(metodo) {
+            const email = document.getElementById('email-promo').value;
+            if (!email) {
+                alert("Por favor, digite seu e-mail.");
+                return;
+            }
+
+            // Pega todas as caixinhas que o usuário marcou
+            const checkboxes = document.querySelectorAll('.cat-checkbox:checked');
+            const categorias = Array.from(checkboxes).map(cb => cb.value);
+
+            if (metodo === 'POST' && categorias.length === 0) {
+                alert("Selecione pelo menos uma categoria para se cadastrar.");
+                return;
+            }
+
+            const payload = {
+                email: email,
+                categorias: categorias
+            };
+
+            try {
+                const resposta = await fetch(`${API_URL}/interesse`, {
+                    method: metodo, // Pode ser POST (cadastrar) ou DELETE (cancelar)
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (resposta.ok) {
+                    alert(metodo === 'POST' ? "Cadastrado com sucesso! Fique de olho no seu e-mail." : "Inscrição cancelada com sucesso.");
+                } else {
+                    alert("Falha ao processar solicitação.");
+                }
+            } catch (erro) {
+                alert("Erro ao conectar com o servidor.");
+            }
+        }
+
+        // --- CATÁLOGO E PEDIDOS ---
         async function carregarCatalogo() {
             try {
-                // Chama a rota GET /produtos do seu MS Principal
                 const resposta = await fetch(`${API_URL}/produtos`);
                 const produtos = await resposta.json();
                 
                 const divLista = document.getElementById('lista-produtos');
-                divLista.innerHTML = ''; // Limpa o "Carregando"
+                divLista.innerHTML = '';
 
                 if (produtos.length === 0) {
                     divLista.innerHTML = '<p>Nenhum produto em estoque.</p>';
                     return;
                 }
 
-                // Cria uma linha para cada produto
                 produtos.forEach(p => {
                     divLista.innerHTML += `
                         <div class="produto">
@@ -63,10 +124,8 @@
             }
         }
 
-        // 2. CRIAR O PEDIDO VIA REST
         async function comprar(idProduto) {
             try {
-                // Monta o JSON igualzinho ao que testamos no cURL
                 const payload = { itens: [{ product_id: idProduto, quantity: 1 }] };
                 
                 const resposta = await fetch(`${API_URL}/pedidos`, {
@@ -77,60 +136,57 @@
 
                 const pedido = await resposta.json();
                 
-                // Mostra a área de status e conecta no SSE usando o link do HATEOAS!
                 document.getElementById('status-container').style.display = 'block';
+                document.getElementById('area-pagamento').innerHTML = ''; // Limpa o botão anterior
                 document.getElementById('numero-pedido').innerText = `#${pedido.order_id}`;
                 document.getElementById('status-texto').innerText = pedido.status;
                 
                 conectarSSE(pedido._links.acompanhar_sse, pedido.order_id);
-
             } catch (erro) {
                 alert("Falha ao criar o pedido.");
             }
         }
 
-        // 3. OUVIR AS MUDANÇAS EM TEMPO REAL (SSE)
+        // --- SSE (ACOMPANHAMENTO EM TEMPO REAL) ---
         function conectarSSE(urlRelativa, orderId) {
-            // Se já tiver um rádio ligado de um pedido anterior, desliga ele primeiro
             if (eventoSSE) eventoSSE.close(); 
 
-            // Liga o rádio na estação específica do pedido
             eventoSSE = new EventSource(`${API_URL}${urlRelativa}`);
 
             eventoSSE.onmessage = function(event) {
                 const novoStatus = event.data;
                 document.getElementById('status-texto').innerText = novoStatus;
 
-                // Regra de Negócio: Se o estoque confirmou, buscar a URL do Mock de Pagamento!
                 if (novoStatus === "pedido.estoque_ok") {
                     buscarLinkPagamento(orderId);
                 }
                 
-                // Se o pedido acabou, desliga o rádio
-                if (["pedido.enviado", "pedido.excluido", "estoque.indisponivel"].includes(novoStatus)) {
+                if (["pedido.enviado", "pedido.excluido", "estoque.indisponivel", "pagamento.recusado"].includes(novoStatus)) {
                     eventoSSE.close();
                 }
             };
         }
 
-        // 4. CONSULTAR A URL DE CHECKOUT (MOCK)
+        // --- MOCK DE PAGAMENTO ---
         async function buscarLinkPagamento(orderId) {
-            // O MS Pagamento demora uns milissegundos para falar com o Mock e salvar o link.
-            // Então esperamos 1 segundinho para consultar (evita erro 404).
             setTimeout(async () => {
-                const resposta = await fetch(`http://localhost:8082/pagamentos/${orderId}`);
-                if (resposta.ok) {
-                    const cobranca = await resposta.json();
-                    document.getElementById('area-pagamento').innerHTML = `
-                        <a href="${cobranca.checkout_url}" target="_blank">
-                            <button style="background: #28a745;">Pagar no Mock Externo ↗</button>
-                        </a>
-                    `;
+                try {
+                    const resposta = await fetch(`http://localhost:8082/pagamentos/${orderId}`);
+                    if (resposta.ok) {
+                        const cobranca = await resposta.json();
+                        document.getElementById('area-pagamento').innerHTML = `
+                            <a href="${cobranca.checkout_url}" target="_blank">
+                                <button style="background: #28a745;">Pagar no Mock Externo ↗</button>
+                            </a>
+                        `;
+                    }
+                } catch (e) {
+                    console.log("Aguardando Mock...");
                 }
             }, 1000);
         }
 
-        // Inicia a tela
+        // Inicializa a tela
         carregarCatalogo();
     </script>
 </body>
