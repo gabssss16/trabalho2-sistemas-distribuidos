@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -21,7 +20,6 @@ import (
 	"time"
 
 	"trabalho2-sistemas-distribuidos/base"
-	"trabalho2-sistemas-distribuidos/base/persistencia"
 )
 
 type solicitacao struct {
@@ -38,11 +36,11 @@ type cobranca struct {
 }
 
 type mockPagamento struct {
-	mu                           sync.Mutex
-	envioMu                      sync.Mutex
-	caminho, baseURL, webhookURL string
-	cobrancas                    map[string]cobranca
-	cliente                      *http.Client
+	mu                  sync.Mutex
+	envioMu             sync.Mutex
+	baseURL, webhookURL string
+	cobrancas           map[string]cobranca
+	cliente             *http.Client
 }
 
 func config(nome, padrao string) string {
@@ -53,11 +51,10 @@ func config(nome, padrao string) string {
 }
 
 func main() {
-	s, err := abrirMock(config("MOCK_DATA_FILE", "mock-pagamento/data/cobrancas.json"), config("MOCK_PUBLIC_URL", "http://localhost:8083"), config("PAGAMENTO_WEBHOOK_URL", "http://localhost:8082/webhook"))
+	s, err := abrirMock(config("MOCK_PUBLIC_URL", "http://localhost:8083"), config("PAGAMENTO_WEBHOOK_URL", "http://localhost:8082/webhook"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	go s.repetirPendentes(context.Background())
 	addr := config("MOCK_ADDR", ":8083")
 	log.Printf("[MOCK] Checkout em %s; HTTP em %s", s.baseURL, addr)
 	log.Fatal((&http.Server{Addr: addr, Handler: s.rotas(), ReadHeaderTimeout: 5 * time.Second}).ListenAndServe())
@@ -68,7 +65,7 @@ func urlHTTP(valor string) bool {
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" && u.User == nil && u.RawQuery == "" && u.Fragment == ""
 }
 
-func abrirMock(caminho, baseURL, webhookURL string) (*mockPagamento, error) {
+func abrirMock(baseURL, webhookURL string) (*mockPagamento, error) {
 	if !urlHTTP(baseURL) || !urlHTTP(webhookURL) {
 		return nil, fmt.Errorf("URLs do mock/webhook inválidas")
 	}
@@ -76,29 +73,7 @@ func abrirMock(caminho, baseURL, webhookURL string) (*mockPagamento, error) {
 	if u.Path != "" && u.Path != "/" {
 		return nil, fmt.Errorf("MOCK_PUBLIC_URL deve conter apenas origem HTTP(S)")
 	}
-	s := &mockPagamento{caminho: caminho, baseURL: strings.TrimRight(baseURL, "/"), webhookURL: webhookURL, cobrancas: make(map[string]cobranca), cliente: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
-	b, err := os.ReadFile(caminho)
-	if errors.Is(err, os.ErrNotExist) {
-		return s, persistencia.Salvar(caminho, s.cobrancas)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(b, &s.cobrancas); err != nil {
-		return nil, err
-	}
-	if s.cobrancas == nil {
-		return nil, fmt.Errorf("arquivo de cobranças inválido")
-	}
-	chaves := make(map[string]bool)
-	pedidos := make(map[int]bool)
-	for id, c := range s.cobrancas {
-		if id == "" || id != c.ID || c.Chave == "" || chaves[c.Chave] || pedidos[c.Solicitacao.OrderID] || validarSolicitacao(c.Solicitacao, webhookURL) != nil || (c.Status != "PENDENTE" && c.Status != "APROVADO" && c.Status != "RECUSADO") || (c.Status == "PENDENTE" && c.Notificado) {
-			return nil, fmt.Errorf("cobrança %s inválida no arquivo", id)
-		}
-		chaves[c.Chave] = true
-		pedidos[c.Solicitacao.OrderID] = true
-	}
+	s := &mockPagamento{baseURL: strings.TrimRight(baseURL, "/"), webhookURL: webhookURL, cobrancas: make(map[string]cobranca), cliente: &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 	return s, nil
 }
 
@@ -116,19 +91,6 @@ func validarSolicitacao(s solicitacao, webhookURL string) error {
 	if s.WebhookURL != webhookURL {
 		return fmt.Errorf("webhook_url deve corresponder a PAGAMENTO_WEBHOOK_URL")
 	}
-	return nil
-}
-
-func (s *mockPagamento) salvar(c cobranca) error {
-	proximo := make(map[string]cobranca, len(s.cobrancas)+1)
-	for id, existente := range s.cobrancas {
-		proximo[id] = existente
-	}
-	proximo[c.ID] = c
-	if err := persistencia.Salvar(s.caminho, proximo); err != nil {
-		return err
-	}
-	s.cobrancas = proximo
 	return nil
 }
 
@@ -184,10 +146,7 @@ func (s *mockPagamento) criar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c := cobranca{Solicitacao: req, Chave: chave, ID: hex.EncodeToString(aleatorio[:]), Status: "PENDENTE"}
-	if err := s.salvar(c); err != nil {
-		http.Error(w, "falha ao persistir cobrança", 503)
-		return
-	}
+	s.cobrancas[c.ID] = c
 	s.responderCobranca(w, 201, c)
 }
 
@@ -201,7 +160,7 @@ var pagina = template.Must(template.New("checkout").Parse(`<!doctype html>
 <body><main><p class="aviso">Ambiente de demonstração · Nenhum valor será cobrado</p><h1>Pedido #{{.Solicitacao.OrderID}}</h1>
 <ul>{{range .Solicitacao.Items}}<li>Produto {{.ProductID}} — {{.Quantity}} unidade(s)</li>{{end}}</ul><p>Status: <strong>{{.Status}}</strong></p>
 {{if eq .Status "PENDENTE"}}<form method="post"><button name="status" value="APROVADO">Pagamento Aprovado</button><button class="recusar" name="status" value="RECUSADO">Pagamento Recusado</button></form>
-{{else}}{{if .Notificado}}<p>Resultado comunicado. Você pode voltar à loja.</p>{{else}}<p>Resultado salvo. A comunicação será repetida automaticamente enquanto este serviço estiver em execução.</p><form method="post"><button name="status" value="{{.Status}}">Tentar comunicar novamente</button></form><p><a href="">Atualizar status</a></p>{{end}}{{end}}
+{{else}}{{if .Notificado}}<p>Resultado comunicado. Você pode voltar à loja.</p>{{else}}<p>Não foi possível comunicar o resultado. Clique abaixo para tentar novamente.</p><form method="post"><button name="status" value="{{.Status}}">Tentar comunicar novamente</button></form><p><a href="">Atualizar status</a></p>{{end}}{{end}}
 </main></body></html>`))
 
 func (s *mockPagamento) checkout(w http.ResponseWriter, r *http.Request) {
@@ -245,11 +204,7 @@ func (s *mockPagamento) decidir(w http.ResponseWriter, r *http.Request) {
 	}
 	if c.Status == "PENDENTE" {
 		c.Status = status
-		if err := s.salvar(c); err != nil {
-			s.mu.Unlock()
-			http.Error(w, "falha ao salvar resultado; tente novamente", 503)
-			return
-		}
+		s.cobrancas[id] = c
 	}
 	s.mu.Unlock()
 	if err := s.notificar(r.Context(), id); err != nil {
@@ -294,38 +249,6 @@ func (s *mockPagamento) notificar(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c.Notificado = true
-	return s.salvar(c)
-}
-
-func (s *mockPagamento) retomarPendentes(ctx context.Context) {
-	s.mu.Lock()
-	var ids []string
-	for id, c := range s.cobrancas {
-		if c.Status != "PENDENTE" && !c.Notificado {
-			ids = append(ids, id)
-		}
-	}
-	s.mu.Unlock()
-	for _, id := range ids {
-		if ctx.Err() != nil {
-			return
-		}
-		if err := s.notificar(ctx, id); err != nil {
-			log.Printf("[MOCK] Webhook pendente de %s: %v", id, err)
-		}
-	}
-}
-
-func (s *mockPagamento) repetirPendentes(ctx context.Context) {
-	s.retomarPendentes(ctx)
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.retomarPendentes(ctx)
-		}
-	}
+	s.cobrancas[id] = c
+	return nil
 }

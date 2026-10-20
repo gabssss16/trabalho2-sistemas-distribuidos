@@ -11,7 +11,10 @@
         button:hover { background: #0056b3; }
         button.btn-danger { background: #dc3545; }
         button.btn-danger:hover { background: #c82333; }
-        .produto { border-bottom: 1px solid #eee; padding: 10px 0; display: flex; justify-content: space-between; align-items: center; }
+        .produto { border-bottom: 1px solid #eee; padding: 10px 0; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .compra { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .compra input { width: 65px; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+        button:disabled { opacity: 0.6; cursor: wait; }
         #status-container { background: #e2e8f0; padding: 15px; border-radius: 8px; margin-top: 15px; display: none; }
         .form-group { margin-bottom: 10px; }
         input[type="email"] { padding: 8px; width: 100%; max-width: 300px; border: 1px solid #ccc; border-radius: 4px; }
@@ -52,6 +55,7 @@
         <h2>Status do Pedido <span id="numero-pedido"></span></h2>
         <h3 id="status-texto" style="color: #0056b3;">Aguardando...</h3>
         <p id="area-pagamento"></p>
+        <button id="cancelar-pedido" class="btn-danger" hidden>Cancelar pedido</button>
     </div>
 
     <script src="app.js"></script>

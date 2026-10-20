@@ -27,7 +27,7 @@ func (s *servicoPrincipal) handleSSE(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mu.Lock()
-	p, ok := s.estado.Pedidos[id]
+	p, ok := s.pedidos[id]
 	if !ok {
 		s.mu.Unlock()
 		erroHTTP(w, 404, "pedido não encontrado")
@@ -70,7 +70,7 @@ func (s *servicoPrincipal) handleSSE(w http.ResponseWriter, r *http.Request) {
 	defer heartbeat.Stop()
 	for {
 		s.mu.Lock()
-		p = s.estado.Pedidos[id]
+		p = s.pedidos[id]
 		historico := slices.Clone(p.Historico)
 		s.mu.Unlock()
 		for cursor < len(historico) {

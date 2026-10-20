@@ -28,8 +28,8 @@ func novoClienteEmail(apiKey, remetente string) (*clienteEmail, error) {
 	return &clienteEmail{apiKey: apiKey, endpoint: "https://api.resend.com/emails", http: &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
-func (c *clienteEmail) enviar(ctx context.Context, n notificacao) error {
-	body, err := json.Marshal(n.Email)
+func (c *clienteEmail) enviar(ctx context.Context, mensagem mensagemEmail) error {
+	body, err := json.Marshal(mensagem)
 	if err != nil {
 		return err
 	}
@@ -39,7 +39,6 @@ func (c *clienteEmail) enviar(ctx context.Context, n notificacao) error {
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", "promocao/"+n.ID)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("API de e-mail indisponível: %w", err)

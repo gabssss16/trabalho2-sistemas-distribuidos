@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"log"
 	"net/http"
@@ -22,10 +21,7 @@ func config(nome, padrao string) string {
 	return padrao
 }
 func main() {
-	s, err := abrirPrincipal(config("PRINCIPAL_DATA_FILE", "principal/data/principal.json"))
-	if err != nil {
-		log.Fatal(err)
-	}
+	s := novoPrincipal()
 	s.estoqueURL = config("ESTOQUE_URL", "http://localhost:8081")
 	s.pagamentoURL = config("PAGAMENTO_URL", "http://localhost:8082")
 	conn := rabbitmq.Conectar()
@@ -36,7 +32,6 @@ func main() {
 	ConfigurarFilaPrincipal(ch)
 	s.publicar = rabbitmq.NovoPublicadorDeEventos(conn, "principal", "principal/keys/principal_private.pem")
 	rabbitmq.ConsumirConfirmado(ch, FilaPrincipal, s.tratarEvento)
-	go s.republicarPendentes(context.Background())
 	addr := config("PRINCIPAL_ADDR", ":8080")
 	log.Printf("[PRINCIPAL] Loja e API em %s", addr)
 	log.Fatal((&http.Server{Addr: addr, Handler: s.rotas(), ReadHeaderTimeout: 5 * time.Second}).ListenAndServe())

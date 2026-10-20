@@ -1,11 +1,9 @@
 package main
 
 import (
-	"context"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"log"
 	"math/rand"
-	"net/url"
 	"os"
 	"time"
 
@@ -60,18 +58,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	servico, err := abrirPromocoes(config("PROMOCOES_DATA_FILE", "promocoes/data/promocoes.json"), remetente)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if endpoint := os.Getenv("PROMOCOES_EMAIL_API_URL"); endpoint != "" {
-		u, err := url.Parse(endpoint)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil {
-			log.Fatal("PROMOCOES_EMAIL_API_URL inválida")
-		}
-		email.endpoint = endpoint
-	}
-	servico.enviar = email.enviar
+	servico := &servicoPromocoes{remetente: remetente, inscricoes: make(map[string][]string), enviar: email.enviar}
 
 	conn := rabbitmq.Conectar()
 	defer conn.Close()
@@ -91,17 +78,11 @@ func main() {
 		return servico.atualizarInteresse(interesse)
 	})
 
-	ctx := context.Background()
-	go servico.repetirPendentes(ctx)
 	log.Printf("[PROMOÇÕES] Consumindo interesses; novas ofertas a cada %s", intervalo)
 	ticker := time.NewTicker(intervalo)
 	defer ticker.Stop()
 	for range ticker.C {
 		promocao := sortearPromocao()
-		if err := servico.agendar(promocao); err != nil {
-			log.Printf("[PROMOÇÕES] Falha ao registrar oferta: %v", err)
-			continue
-		}
 		// Mantém o contrato Topic dos consumidores C1 e C2 do trabalho anterior.
 		routingKey := "promocao.categoria." + promocao.Categoria
 		evento, err := base.CriarEvento(routingKey, "promocoes", promocao)
@@ -121,6 +102,7 @@ func main() {
 		if err := rabbitmq.PublicarEvento(publicador, rabbitmq.ExchangePromocoes, routingKey, body); err != nil {
 			log.Printf("[PROMOÇÕES] Falha ao publicar oferta: %v", err)
 		}
+		servico.notificar(promocao)
 	}
 }
 

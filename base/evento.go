@@ -14,13 +14,11 @@ const (
 	PedidoEnviado                = "pedido.enviado"
 )
 
-// InteressePromocaoPayload é publicado pelo Principal. Versao cresce por e-mail
-// e deve ser preservada pelo Gateway entre reinícios.
+// InteressePromocaoPayload é publicado pelo Principal para cadastrar ou cancelar um e-mail.
 type InteressePromocaoPayload struct {
 	Email      string   `json:"email"`
 	Categorias []string `json:"categorias,omitempty"`
 	Acao       string   `json:"acao"`
-	Versao     int64    `json:"versao"`
 }
 
 type OrderItem struct {

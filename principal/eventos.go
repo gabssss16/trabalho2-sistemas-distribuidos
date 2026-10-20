@@ -30,7 +30,7 @@ func (s *servicoPrincipal) tratarEvento(d amqp.Delivery) error {
 func (s *servicoPrincipal) aplicarEvento(tipo string, id int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p, ok := s.estado.Pedidos[id]
+	p, ok := s.pedidos[id]
 	if !ok {
 		return fmt.Errorf("%w: pedido desconhecido", rabbitmq.ErrEventoInvalido)
 	}
@@ -40,8 +40,7 @@ func (s *servicoPrincipal) aplicarEvento(tipo string, id int) error {
 	if tipo == base.EstoqueOK && (p.Status == base.PagamentoAprovado || p.Status == base.PedidoCancelamentoSolicitado) {
 		return nil
 	}
-	e := s.copiarEstado()
-	p = e.Pedidos[id]
+	p.Historico = slices.Clone(p.Historico)
 	// Envio prova que estoque e pagamento foram aprovados. Normaliza a ordem
 	// causal mesmo se produtores diferentes chegarem em outra ordem na fila.
 	sucesso := []string{base.EstoqueOK, base.PagamentoAprovado, base.PedidoEnviado}
@@ -55,16 +54,12 @@ func (s *servicoPrincipal) aplicarEvento(tipo string, id int) error {
 		p.Historico = append(p.Historico, tipo)
 	}
 	p.Status = tipo
-	e.Pedidos[id] = p
 	if tipo == base.PagamentoRecusado || tipo == base.EstoqueIndisponivel {
-		if err := e.agendar(base.PedidoExcluido, base.OrderPayload{OrderID: id, Items: p.Itens}); err != nil {
+		if err := s.publicar(base.PedidoExcluido, base.OrderPayload{OrderID: id, Items: p.Itens}); err != nil {
 			return err
 		}
 	}
-	if err := s.salvar(e); err != nil {
-		return err
-	}
+	s.pedidos[id] = p
 	s.avisar(id)
-	s.sinalizar()
 	return nil
 }

@@ -6,10 +6,8 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"slices"
 	"strconv"
 	"strings"
-	"time"
 	"trabalho2-sistemas-distribuidos/base"
 	"trabalho2-sistemas-distribuidos/front"
 )
@@ -93,24 +91,20 @@ func (s *servicoPrincipal) criarPedido(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e := s.copiarEstado()
-	id := e.ProximoID
+	id := s.proximoID
 	if id == math.MaxInt {
 		erroHTTP(w, 503, "limite de identificadores")
 		return
 	}
-	e.ProximoID++
+	s.proximoID++
 	p := Pedido{Itens: req.Itens, Status: base.PedidoCriado, Historico: []string{base.PedidoCriado}}
-	e.Pedidos[id] = p
-	if err := e.agendar(base.PedidoCriado, base.OrderPayload{OrderID: id, Items: req.Itens}); err != nil {
-		erroHTTP(w, 500, "falha ao preparar pedido")
+	// O consumidor só altera o pedido após a liberação do mutex.
+	s.pedidos[id] = p
+	if err := s.publicar(base.PedidoCriado, base.OrderPayload{OrderID: id, Items: req.Itens}); err != nil {
+		delete(s.pedidos, id)
+		erroHTTP(w, 503, "falha ao publicar pedido")
 		return
 	}
-	if err := s.salvar(e); err != nil {
-		erroHTTP(w, 503, "falha ao salvar pedido")
-		return
-	}
-	s.sinalizar()
 	w.Header().Set("Location", fmt.Sprintf("/pedidos/%d", id))
 	responderJSON(w, 201, respostaPedido(id, p))
 }
@@ -128,7 +122,7 @@ func (s *servicoPrincipal) consultarPedido(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.mu.Lock()
-	p, ok := s.estado.Pedidos[id]
+	p, ok := s.pedidos[id]
 	s.mu.Unlock()
 	if !ok {
 		erroHTTP(w, 404, "pedido não encontrado")
@@ -144,7 +138,7 @@ func (s *servicoPrincipal) cancelarPedido(w http.ResponseWriter, r *http.Request
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	p, ok := s.estado.Pedidos[id]
+	p, ok := s.pedidos[id]
 	if !ok {
 		erroHTTP(w, 404, "pedido não encontrado")
 		return
@@ -154,21 +148,14 @@ func (s *servicoPrincipal) cancelarPedido(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if p.Status != base.PedidoCancelamentoSolicitado {
-		e := s.copiarEstado()
-		p = e.Pedidos[id]
+		if err := s.publicar(base.PedidoCancelamentoSolicitado, base.OrderPayload{OrderID: id, Items: p.Itens}); err != nil {
+			erroHTTP(w, 503, "falha ao solicitar cancelamento")
+			return
+		}
 		p.Status = base.PedidoCancelamentoSolicitado
 		p.Historico = append(p.Historico, p.Status)
-		e.Pedidos[id] = p
-		if err := e.agendar(base.PedidoCancelamentoSolicitado, base.OrderPayload{OrderID: id, Items: p.Itens}); err != nil {
-			erroHTTP(w, 500, "falha ao preparar cancelamento")
-			return
-		}
-		if err := s.salvar(e); err != nil {
-			erroHTTP(w, 503, "falha ao salvar cancelamento")
-			return
-		}
+		s.pedidos[id] = p
 		s.avisar(id)
-		s.sinalizar()
 	}
 	responderJSON(w, 202, respostaPedido(id, p))
 }
@@ -182,7 +169,7 @@ func (s *servicoPrincipal) consultarPagamento(w http.ResponseWriter, r *http.Req
 		return
 	}
 	s.mu.Lock()
-	p, ok := s.estado.Pedidos[id]
+	p, ok := s.pedidos[id]
 	s.mu.Unlock()
 	if !ok {
 		erroHTTP(w, 404, "pedido não encontrado")
@@ -227,47 +214,14 @@ func (s *servicoPrincipal) alterarInteresse(w http.ResponseWriter, r *http.Reque
 		erroHTTP(w, 400, "JSON inválido")
 		return
 	}
-	i, err := base.NormalizarInteresse(base.InteressePromocaoPayload{Email: req.Email, Categorias: req.Categorias, Acao: acao, Versao: 1})
+	i, err := base.NormalizarInteresse(base.InteressePromocaoPayload{Email: req.Email, Categorias: req.Categorias, Acao: acao})
 	if err != nil {
 		erroHTTP(w, 400, err.Error())
 		return
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	e := s.copiarEstado()
-	anterior := e.Interesses[i.Email]
-	if anterior.Versao == math.MaxInt64 {
-		erroHTTP(w, 503, "limite de versões")
+	if err := s.publicar(base.InteressePromocao, i); err != nil {
+		erroHTTP(w, 503, "falha ao publicar preferência")
 		return
 	}
-	i.Versao = max(time.Now().UnixMilli(), anterior.Versao+1)
-	// Publica o estado completo desejado: cancelar parcialmente tambem e seguro
-	// se comandos forem repetidos ou recebidos fora de ordem.
-	if acao == "cancelar" {
-		cats := []string{}
-		if len(i.Categorias) > 0 {
-			for _, c := range anterior.Categorias {
-				if !slices.Contains(i.Categorias, c) {
-					cats = append(cats, c)
-				}
-			}
-		}
-		i.Categorias = cats
-		if len(cats) > 0 {
-			i.Acao = "cadastrar"
-		} else {
-			i.Categorias = nil
-		}
-	}
-	e.Interesses[i.Email] = interesseSalvo{i.Versao, i.Categorias}
-	if err := e.agendar(base.InteressePromocao, i); err != nil {
-		erroHTTP(w, 500, "falha ao preparar interesse")
-		return
-	}
-	if err := s.salvar(e); err != nil {
-		erroHTTP(w, 503, "falha ao salvar interesse")
-		return
-	}
-	s.sinalizar()
-	responderJSON(w, 202, map[string]any{"message": "Preferência salva; sincronização pendente", "versao": i.Versao, "categorias": i.Categorias})
+	responderJSON(w, 202, map[string]string{"message": "Preferência enviada para processamento"})
 }

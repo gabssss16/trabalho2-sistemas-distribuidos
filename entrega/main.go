@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"os"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"trabalho2-sistemas-distribuidos/base"
@@ -11,14 +10,7 @@ import (
 )
 
 func main() {
-	caminho := os.Getenv("ENTREGA_DATA_FILE")
-	if caminho == "" {
-		caminho = "entrega/data/entregas.json"
-	}
-	servico, err := abrirEntrega(caminho)
-	if err != nil {
-		log.Fatal(err)
-	}
+	servico := &servicoEntrega{enviados: make(map[int]bool)}
 	conn := rabbitmq.Conectar()
 	defer conn.Close()
 	ch := rabbitmq.AbrirCanal(conn)

@@ -17,7 +17,7 @@ async function gerenciarInteresse(metodo) {
     }
     try {
         await requisitar('/interesse', {method: metodo, headers: {'Content-Type': 'application/json'}, body: JSON.stringify({email, categorias})});
-        alert('Preferência salva. A atualização será processada pela loja.');
+        alert(metodo === 'DELETE' ? 'Cancelamento enviado para este e-mail.' : 'Cadastro enviado para este e-mail.');
     } catch (erro) { alert(erro.message); }
 }
 async function carregarCatalogo() {
@@ -29,14 +29,28 @@ async function carregarCatalogo() {
         for (const p of produtos) {
             const linha = document.createElement('div'); linha.className = 'produto';
             const nome = document.createElement('span'); nome.textContent = `${p.name} (Estoque: ${p.quantity})`;
-            const botao = document.createElement('button'); botao.textContent = 'Comprar 1 unidade'; botao.onclick = () => comprar(p.product_id);
-            linha.append(nome, botao); lista.append(linha);
+            const formulario = document.createElement('form'); formulario.className = 'compra';
+            const rotulo = document.createElement('label'); rotulo.htmlFor = `quantidade-${p.product_id}`; rotulo.textContent = 'Quantidade';
+            const quantidade = document.createElement('input');
+            quantidade.id = rotulo.htmlFor; quantidade.type = 'number'; quantidade.min = '1';
+            quantidade.max = String(p.quantity); quantidade.step = '1'; quantidade.value = '1'; quantidade.required = true;
+            const botao = document.createElement('button'); botao.type = 'submit'; botao.textContent = 'Comprar';
+            formulario.onsubmit = async event => {
+                event.preventDefault();
+                if (!formulario.reportValidity()) return;
+                botao.disabled = true;
+                try { await comprar(p.product_id, Number(quantidade.value)); }
+                finally { botao.disabled = false; }
+            };
+            formulario.append(rotulo, quantidade, botao);
+            linha.append(nome, formulario); lista.append(linha);
         }
     } catch (erro) { lista.textContent = `Não foi possível carregar o catálogo: ${erro.message}`; }
 }
-async function comprar(idProduto) {
+async function comprar(idProduto, quantidade) {
     try {
-        const pedido = await requisitar('/pedidos', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({itens: [{product_id: idProduto, quantity: 1}]})});
+        if (!Number.isSafeInteger(quantidade) || quantidade < 1) throw new Error('Informe uma quantidade inteira maior que zero.');
+        const pedido = await requisitar('/pedidos', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({itens: [{product_id: idProduto, quantity: quantidade}]})});
         if (consultaPagamento) consultaPagamento.abort();
         consultaPagamento = null;
         pedidoAtual = pedido.order_id;
@@ -44,6 +58,16 @@ async function comprar(idProduto) {
         document.getElementById('area-pagamento').replaceChildren();
         document.getElementById('numero-pedido').textContent = `#${pedido.order_id}`;
         document.getElementById('status-texto').textContent = pedido.status;
+        const cancelar = document.getElementById('cancelar-pedido');
+        cancelar.hidden = !pedido._links.cancelar;
+        cancelar.disabled = false;
+        cancelar.onclick = async () => {
+            cancelar.disabled = true;
+            try {
+                await requisitar(pedido._links.cancelar, {method: 'POST'});
+                if (pedidoAtual === pedido.order_id) cancelar.hidden = true;
+            } catch (erro) { alert(erro.message); cancelar.disabled = false; }
+        };
         conectarSSE(pedido._links.acompanhar_sse, pedido.order_id, pedido._links.pagamento);
     } catch (erro) { console.error(erro); alert(`Falha ao criar o pedido: ${erro.message}`); }
 }
@@ -54,8 +78,11 @@ function conectarSSE(url, orderId, pagamentoURL) {
         if (pedidoAtual !== orderId) return;
         const status = event.data;
         document.getElementById('status-texto').textContent = status;
+        if (['pedido.cancelamento_solicitado', 'pagamento.aprovado', 'pedido.enviado', 'pedido.excluido', 'estoque.indisponivel', 'pagamento.recusado'].includes(status)) {
+            document.getElementById('cancelar-pedido').hidden = true;
+        }
         if (status === 'pedido.estoque_ok' && !consultaPagamento) buscarLinkPagamento(orderId, pagamentoURL);
-        if (['pagamento.aprovado', 'pedido.enviado', 'pedido.excluido', 'estoque.indisponivel', 'pagamento.recusado'].includes(status)) {
+        if (['pedido.cancelamento_solicitado', 'pagamento.aprovado', 'pedido.enviado', 'pedido.excluido', 'estoque.indisponivel', 'pagamento.recusado'].includes(status)) {
             if (consultaPagamento) consultaPagamento.abort();
             document.getElementById('area-pagamento').replaceChildren();
         }

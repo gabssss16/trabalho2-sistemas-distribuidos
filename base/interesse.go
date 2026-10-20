@@ -13,8 +13,8 @@ func NormalizarInteresse(i InteressePromocaoPayload) (InteressePromocaoPayload, 
 	if err != nil || a.Address != i.Email || !strings.Contains(i.Email, "@") {
 		return i, fmt.Errorf("email inválido")
 	}
-	if i.Versao <= 0 || (i.Acao != "cadastrar" && i.Acao != "cancelar") {
-		return i, fmt.Errorf("acao ou versao inválida")
+	if i.Acao != "cadastrar" && i.Acao != "cancelar" {
+		return i, fmt.Errorf("acao inválida")
 	}
 	i.Categorias = slices.Clone(i.Categorias)
 	for n, c := range i.Categorias {

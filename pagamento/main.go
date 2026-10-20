@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,7 +14,6 @@ import (
 	"sync"
 	"time"
 	"trabalho2-sistemas-distribuidos/base"
-	"trabalho2-sistemas-distribuidos/base/persistencia"
 	"trabalho2-sistemas-distribuidos/base/rabbitmq"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -23,7 +21,6 @@ import (
 
 func main() {
 	servico, err := abrirPagamento(
-		config("PAGAMENTO_DATA_FILE", "pagamento/data/pagamentos.json"),
 		config("MOCK_PAGAMENTO_URL", "http://localhost:8083/cobrancas"),
 		config("PAGAMENTO_WEBHOOK_URL", "http://localhost:8082/webhook"),
 	)
@@ -39,7 +36,6 @@ func main() {
 	rabbitmq.VincularFila(ch, fila.Name, base.EstoqueOK, rabbitmq.ExchangeEcommerce)
 	rabbitmq.VincularFila(ch, fila.Name, base.PedidoCancelamentoSolicitado, rabbitmq.ExchangeEcommerce)
 	servico.publicar = rabbitmq.NovoPublicadorAssinado(conn, "pagamento", "pagamento/keys/pagamento_private.pem")
-	go servico.republicarPendentes(context.Background())
 	rabbitmq.ConsumirConfirmado(ch, fila.Name, func(d amqp.Delivery) error {
 		if d.RoutingKey == base.PedidoCancelamentoSolicitado {
 			pedido, err := lerPedidoOrigem(d, base.PedidoCancelamentoSolicitado, "principal")
@@ -105,40 +101,20 @@ type cobranca struct {
 }
 
 type servicoPagamento struct {
-	mu                           sync.Mutex
-	caminho, mockURL, webhookURL string
-	cliente                      *http.Client
-	cobrancas                    map[int]cobranca
-	publicar                     func(string, base.OrderPayload) error
+	mu                  sync.Mutex
+	mockURL, webhookURL string
+	cliente             *http.Client
+	cobrancas           map[int]cobranca
+	publicar            func(string, base.OrderPayload) error
 }
 
-func abrirPagamento(caminho, mockURL, webhookURL string) (*servicoPagamento, error) {
+func abrirPagamento(mockURL, webhookURL string) (*servicoPagamento, error) {
 	if !urlHTTP(mockURL) || !urlHTTP(webhookURL) {
 		return nil, fmt.Errorf("URLs do mock e webhook devem ser HTTP(S) absolutas")
 	}
 	s := &servicoPagamento{
-		caminho: caminho, mockURL: mockURL, webhookURL: webhookURL,
+		mockURL: mockURL, webhookURL: webhookURL,
 		cliente: &http.Client{Timeout: 10 * time.Second}, cobrancas: make(map[int]cobranca),
-	}
-	conteudo, err := os.ReadFile(caminho)
-	if errors.Is(err, os.ErrNotExist) {
-		return s, persistencia.Salvar(caminho, s.cobrancas)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := json.Unmarshal(conteudo, &s.cobrancas); err != nil {
-		return nil, err
-	}
-	if s.cobrancas == nil {
-		return nil, fmt.Errorf("arquivo de cobranças inválido")
-	}
-	for id, c := range s.cobrancas {
-		if id <= 0 || id != c.Pedido.OrderID || c.ChargeID == "" ||
-			(c.Status != "PENDENTE" && c.Status != "APROVADO" && c.Status != "RECUSADO") ||
-			(c.Status == "PENDENTE" && c.Publicado) {
-			return nil, fmt.Errorf("cobrança %d inválida no arquivo", id)
-		}
 	}
 	return s, nil
 }
@@ -146,21 +122,6 @@ func abrirPagamento(caminho, mockURL, webhookURL string) (*servicoPagamento, err
 func urlHTTP(valor string) bool {
 	u, err := url.Parse(valor)
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" && u.User == nil
-}
-
-// salvarCobranca mantém a memória anterior em caso de falha de persistência.
-// Quem chama mantém o mutex adquirido.
-func (s *servicoPagamento) salvarCobranca(c cobranca) error {
-	proximo := make(map[int]cobranca, len(s.cobrancas)+1)
-	for id, existente := range s.cobrancas {
-		proximo[id] = existente
-	}
-	proximo[c.Pedido.OrderID] = c
-	if err := persistencia.Salvar(s.caminho, proximo); err != nil {
-		return err
-	}
-	s.cobrancas = proximo
-	return nil
 }
 
 func (s *servicoPagamento) criarCobranca(pedido base.OrderPayload) error {
@@ -208,9 +169,7 @@ func (s *servicoPagamento) criarCobranca(pedido base.OrderPayload) error {
 		return fmt.Errorf("mock não informou charge_id e checkout_url válidos")
 	}
 	c := cobranca{Pedido: pedido, ChargeID: resposta.ChargeID, CheckoutURL: resposta.CheckoutURL, Status: "PENDENTE"}
-	if err := s.salvarCobranca(c); err != nil {
-		return err
-	}
+	s.cobrancas[pedido.OrderID] = c
 	log.Printf("[PAGAMENTO] Pedido %d: checkout %s", pedido.OrderID, c.CheckoutURL)
 	return nil
 }
@@ -296,15 +255,12 @@ func (s *servicoPagamento) receberWebhook(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	// Persiste o resultado antes de publicar; uma repetição retoma publicação pendente.
+	// Guarda a decisão para rejeitar resultados conflitantes e permitir repetir o webhook.
 	c.Status = notificacao.Status
-	if err := s.salvarCobranca(c); err != nil {
-		responderErro(w, 503, "falha ao persistir resultado; repita o webhook")
-		return
-	}
+	s.cobrancas[c.Pedido.OrderID] = c
 	if err := s.publicarResultado(c, tipo); err != nil {
 		log.Printf("[PAGAMENTO] Falha ao publicar pedido %d: %v", c.Pedido.OrderID, err)
-		responderErro(w, 503, "resultado salvo; publicação pendente, repita o webhook")
+		responderErro(w, 503, "falha ao publicar resultado; repita o webhook")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -320,45 +276,17 @@ func responderErro(w http.ResponseWriter, status int, mensagem string) {
 	responderJSON(w, status, map[string]string{"error": mensagem})
 }
 
-// Quem chama mantém o mutex. Duplicatas ainda são possíveis se o processo
-// cair após a confirmação do broker e antes de salvar Publicado.
+// Chamado sob mutex; evita republicar um resultado já confirmado.
 func (s *servicoPagamento) publicarResultado(c cobranca, tipo string) error {
+	if c.Publicado {
+		return nil
+	}
 	if err := s.publicar(tipo, c.Pedido); err != nil {
 		return err
 	}
 	c.Publicado = true
-	return s.salvarCobranca(c)
-}
-
-func (s *servicoPagamento) retomarPendentes() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, c := range s.cobrancas {
-		if c.Publicado || c.Status == "PENDENTE" {
-			continue
-		}
-		tipo := base.PagamentoAprovado
-		if c.Status == "RECUSADO" {
-			tipo = base.PagamentoRecusado
-		}
-		if err := s.publicarResultado(c, tipo); err != nil {
-			log.Printf("[PAGAMENTO] Resultado pendente do pedido %d: %v", c.Pedido.OrderID, err)
-		}
-	}
-}
-
-func (s *servicoPagamento) republicarPendentes(ctx context.Context) {
-	s.retomarPendentes()
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.retomarPendentes()
-		}
-	}
+	s.cobrancas[c.Pedido.OrderID] = c
+	return nil
 }
 
 // Pagamento arbitra cancelamento e webhook sob o mesmo mutex. Quem finalizar
@@ -376,9 +304,7 @@ func (s *servicoPagamento) cancelarPedido(pedido base.OrderPayload) error {
 	if c.Status == "PENDENTE" {
 		c.Status = "RECUSADO"
 		c.Publicado = false
-		if err := s.salvarCobranca(c); err != nil {
-			return err
-		}
+		s.cobrancas[pedido.OrderID] = c
 	}
 	tipo := base.PagamentoRecusado
 	if c.Status == "APROVADO" {
