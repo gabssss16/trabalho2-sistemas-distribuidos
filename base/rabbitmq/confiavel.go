@@ -17,10 +17,17 @@ var ErrEventoInvalido = errors.New("evento inválido")
 
 // NovoPublicadorAssinado usa canal exclusivo e aguarda confirmação do broker.
 func NovoPublicadorAssinado(conn *amqp.Connection, produtor, chave string) func(string, base.OrderPayload) error {
+	publicar := NovoPublicadorDeEventos(conn, produtor, chave)
+	return func(tipo string, pedido base.OrderPayload) error { return publicar(tipo, pedido) }
+}
+
+// NovoPublicadorDeEventos permite pedidos e interesses no mesmo envelope assinado.
+func NovoPublicadorDeEventos(conn *amqp.Connection, produtor, chave string) func(string, any) error {
 	ch := AbrirCanal(conn)
 	FailOnError(ch.Confirm(false), "Falha ao habilitar confirmações")
+	devolvidas := ch.NotifyReturn(make(chan amqp.Return, 1))
 	var mu sync.Mutex
-	return func(tipo string, pedido base.OrderPayload) error {
+	return func(tipo string, pedido any) error {
 		evento, err := base.CriarEvento(tipo, produtor, pedido)
 		if err != nil {
 			return err
@@ -36,7 +43,7 @@ func NovoPublicadorAssinado(conn *amqp.Connection, produtor, chave string) func(
 		defer mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		confirmacao, err := ch.PublishWithDeferredConfirmWithContext(ctx, ExchangeEcommerce, tipo, false, false, amqp.Publishing{
+		confirmacao, err := ch.PublishWithDeferredConfirmWithContext(ctx, ExchangeEcommerce, tipo, true, false, amqp.Publishing{
 			ContentType: "application/json", DeliveryMode: amqp.Persistent, Body: body,
 		})
 		if err != nil {
@@ -44,10 +51,16 @@ func NovoPublicadorAssinado(conn *amqp.Connection, produtor, chave string) func(
 		}
 		ok, err := confirmacao.WaitContext(ctx)
 		if err != nil {
+			ch.Close() // Nao reutiliza canal com confirmacao de resultado incerto.
 			return err
 		}
 		if !ok {
 			return fmt.Errorf("broker recusou %s", tipo)
+		}
+		select {
+		case retorno := <-devolvidas:
+			return fmt.Errorf("evento sem fila de destino: %s (%d)", retorno.RoutingKey, retorno.ReplyCode)
+		default:
 		}
 		return nil
 	}

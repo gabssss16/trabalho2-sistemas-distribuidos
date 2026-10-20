@@ -28,7 +28,7 @@ func main() {
 	defer conn.Close()
 	ch := rabbitmq.AbrirCanal(conn)
 	defer ch.Close()
-	rabbitmq.DeclararExchangeEcommerce(ch)
+	rabbitmq.DeclararTopologiaEcommerce(ch)
 	fila := rabbitmq.DeclararFila(ch, "fila_estoque")
 	for _, tipo := range []string{base.PedidoCriado, base.PedidoExcluido} {
 		rabbitmq.VincularFila(ch, fila.Name, tipo, rabbitmq.ExchangeEcommerce)

@@ -3,14 +3,15 @@ package base
 import "encoding/json"
 
 const (
-	InteressePromocao   = "interesse.promocao"
-	PedidoCriado        = "pedido.criado"
-	EstoqueOK           = "pedido.estoque_ok"
-	EstoqueIndisponivel = "estoque.indisponivel"
-	PagamentoAprovado   = "pagamento.aprovado"
-	PagamentoRecusado   = "pagamento.recusado"
-	PedidoExcluido      = "pedido.excluido"
-	PedidoEnviado       = "pedido.enviado"
+	InteressePromocao            = "interesse.promocao"
+	PedidoCriado                 = "pedido.criado"
+	PedidoCancelamentoSolicitado = "pedido.cancelamento_solicitado"
+	EstoqueOK                    = "pedido.estoque_ok"
+	EstoqueIndisponivel          = "estoque.indisponivel"
+	PagamentoAprovado            = "pagamento.aprovado"
+	PagamentoRecusado            = "pagamento.recusado"
+	PedidoExcluido               = "pedido.excluido"
+	PedidoEnviado                = "pedido.enviado"
 )
 
 // InteressePromocaoPayload é publicado pelo Principal. Versao cresce por e-mail

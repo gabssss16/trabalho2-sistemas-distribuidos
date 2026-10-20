@@ -1,6 +1,9 @@
 package rabbitmq
 
-import amqp "github.com/rabbitmq/amqp091-go"
+import (
+	amqp "github.com/rabbitmq/amqp091-go"
+	"trabalho2-sistemas-distribuidos/base"
+)
 
 const (
 	ExchangeEcommerce = "eCommerce"
@@ -60,4 +63,23 @@ func VincularFila(ch *amqp.Channel, nomeFila, routingKey, exchange string) {
 	)
 
 	FailOnError(err, "Falha ao vincular a fila "+nomeFila+" à exchange "+exchange)
+}
+
+// Declara todos os destinos antes da primeira publicacao. Assim, um consumidor
+// temporariamente offline nao faz perder sua copia do evento por falta de fila.
+func DeclararTopologiaEcommerce(ch *amqp.Channel) {
+	DeclararExchangeEcommerce(ch)
+	destinos := map[string][]string{
+		"fila.principal":            {base.EstoqueOK, base.EstoqueIndisponivel, base.PagamentoAprovado, base.PagamentoRecusado, base.PedidoEnviado},
+		"fila_estoque":              {base.PedidoCriado, base.PedidoExcluido},
+		"fila.pagamento":            {base.EstoqueOK, base.PedidoCancelamentoSolicitado},
+		"fila.entrega":              {base.PagamentoAprovado},
+		"fila.promocoes.interesses": {base.InteressePromocao},
+	}
+	for fila, tipos := range destinos {
+		DeclararFila(ch, fila)
+		for _, tipo := range tipos {
+			VincularFila(ch, fila, tipo, ExchangeEcommerce)
+		}
+	}
 }

@@ -2,6 +2,7 @@ package rabbitmq
 
 import (
 	"log"
+	"os"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -13,7 +14,11 @@ func FailOnError(err error, msg string) {
 }
 
 func Conectar() *amqp.Connection {
-	conn, err := amqp.Dial("amqp://guest:guest@127.0.0.1:5672/")
+	endereco := os.Getenv("RABBITMQ_URL")
+	if endereco == "" {
+		endereco = "amqp://guest:guest@127.0.0.1:5672/"
+	}
+	conn, err := amqp.Dial(endereco)
 	FailOnError(err, "Falha ao conectar ao RabbitMQ")
 	return conn
 }

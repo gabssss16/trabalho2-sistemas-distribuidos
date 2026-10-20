@@ -19,8 +19,9 @@ func PublicarEvento(ch *amqp.Channel, exchange, routingKey string, body []byte) 
 		false, // mandatory
 		false, // immediate
 		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        body,
+			ContentType:  "application/json",
+			DeliveryMode: amqp.Persistent,
+			Body:         body,
 		})
 	if err != nil {
 		return fmt.Errorf("falha em publicar a mensagem: %w", err)
