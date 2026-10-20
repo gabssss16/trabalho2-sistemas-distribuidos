@@ -2,13 +2,14 @@ package rabbitmq
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-func PublicarEvento(ch *amqp.Channel, exchange, routingKey string, body []byte) {
+func PublicarEvento(ch *amqp.Channel, exchange, routingKey string, body []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -21,6 +22,9 @@ func PublicarEvento(ch *amqp.Channel, exchange, routingKey string, body []byte) 
 			ContentType: "application/json",
 			Body:        body,
 		})
-	FailOnError(err, "Falha em publicar a mensagem")
+	if err != nil {
+		return fmt.Errorf("falha em publicar a mensagem: %w", err)
+	}
 	log.Printf("[x] Evento publicado com sucesso | Routing Key: %s", routingKey)
+	return nil
 }

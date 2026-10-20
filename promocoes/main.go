@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	mrand "math/rand"
 	"net/http"
@@ -319,6 +318,7 @@ func main() {
 
 	for range ticker.C {
 		promocao := sortearPromocao()
+		log.Printf("[PROMOÇÕES] Nova promoção gerada: %s (%d%%) | categoria %s", promocao.Produto, promocao.Desconto, promocao.Categoria)
 		servico.agendar(promocao)
 
 		routingKey := "promocao.categoria." + promocao.Categoria
@@ -333,6 +333,8 @@ func main() {
 		if err != nil {
 			continue
 		}
-		rabbitmq.PublicarEvento(publicador, rabbitmq.ExchangePromocoes, routingKey, body)
+		if err := rabbitmq.PublicarEvento(publicador, rabbitmq.ExchangePromocoes, routingKey, body); err != nil {
+			log.Printf("[PROMOÇÕES] Falha ao publicar oferta: %v", err)
+		}
 	}
 }

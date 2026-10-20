@@ -134,7 +134,17 @@
                     body: JSON.stringify(payload)
                 });
 
-                const pedido = await resposta.json();
+                const corpo = await resposta.text();
+                if (!resposta.ok) {
+                    throw new Error(`API respondeu ${resposta.status}: ${corpo.trim() || resposta.statusText}`);
+                }
+
+                let pedido;
+                try {
+                    pedido = JSON.parse(corpo);
+                } catch {
+                    throw new Error("A API retornou uma resposta inválida.");
+                }
                 
                 document.getElementById('status-container').style.display = 'block';
                 document.getElementById('area-pagamento').innerHTML = ''; // Limpa o botão anterior
@@ -143,7 +153,8 @@
                 
                 conectarSSE(pedido._links.acompanhar_sse, pedido.order_id);
             } catch (erro) {
-                alert("Falha ao criar o pedido.");
+                console.error("Falha ao criar o pedido:", erro);
+                alert(`Falha ao criar o pedido: ${erro.message}`);
             }
         }
 

@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // hashEvento inclui tipo, produtor e payload, mas não a própria assinatura.
@@ -23,7 +24,29 @@ func hashEvento(evento Event) ([32]byte, error) {
 	return sha256.Sum256(conteudo), nil
 }
 
+func resolverCaminhoChave(caminho string) string {
+	if caminho == "" || filepath.IsAbs(caminho) {
+		return caminho
+	}
+	if _, err := os.Stat(caminho); err == nil {
+		return caminho
+	}
+
+	candidatos := []string{
+		filepath.Join("trabalho2-sistemas-distribuidos", caminho),
+		filepath.Join("..", "trabalho2-sistemas-distribuidos", caminho),
+		filepath.Join("..", caminho),
+	}
+	for _, candidato := range candidatos {
+		if _, err := os.Stat(candidato); err == nil {
+			return candidato
+		}
+	}
+	return caminho
+}
+
 func lerChave(caminho string) ([]byte, error) {
+	caminho = resolverCaminhoChave(caminho)
 	conteudo, err := os.ReadFile(caminho)
 	if err != nil {
 		return nil, err
