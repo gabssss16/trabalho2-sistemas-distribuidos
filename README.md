@@ -2,11 +2,9 @@
 
 Backend de um sistema de e-commerce baseado em microsserviços independentes. Os eventos usam RabbitMQ, com as exchanges `eCommerce` (Direct) e `Promoções` (Topic), e são assinados e validados via criptografia assimétrica RSA. Estoque e Pagamento também expõem APIs HTTP para consulta de produtos, checkout e webhook.
 
-Os serviços de **Estoque e Pagamento da Avaliação 3**, incluindo execução, persistência e contrato REST com o mock, estão documentados em [docs/estoque-pagamento.md](docs/estoque-pagamento.md).
+Para estudar a arquitetura, os fluxos de negócio e perguntas comuns da apresentação, consulte o [guia de apresentação](docs/guia-apresentacao.md).
 
-O fluxo de **Pagamento, Mock de checkout e Entrega**, com execução e roteiro de teste, está em [docs/entrega-pagamento.md](docs/entrega-pagamento.md).
-
-O **MS Promoções**, o contrato de inscrições/cancelamentos com o Principal e a configuração da API de e-mail estão em [docs/promocoes.md](docs/promocoes.md).
+O contrato e a persistência de Estoque e Pagamento também estão descritos em [estoque-pagamento.md](estoque-pagamento.md).
 
 ## 1. Pré-requisitos
 
