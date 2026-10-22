@@ -68,7 +68,11 @@ async function comprar(idProduto, quantidade) {
                 if (pedidoAtual === pedido.order_id) cancelar.hidden = true;
             } catch (erro) { alert(erro.message); cancelar.disabled = false; }
         };
-        conectarSSE(pedido._links.acompanhar_sse, pedido.order_id, pedido._links.pagamento);
+        conectarSSE(
+            pedido._links.acompanhar_sse, 
+            pedido.order_id, 
+            pedido._links.pagamento
+        );
     } catch (erro) { console.error(erro); alert(`Falha ao criar o pedido: ${erro.message}`); }
 }
 function conectarSSE(url, orderId, pagamentoURL) {

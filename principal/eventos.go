@@ -37,9 +37,11 @@ func (s *servicoPrincipal) aplicarEvento(tipo string, id int) error {
 	if pedidoFinalizado(p.Status) || p.Status == tipo {
 		return nil
 	}
+	// Normaliza a ordem. Por exemplo, se o pagamento for aprovado antes do estoque ser confirmado, o histórico ainda refletirá a ordem correta.
 	if tipo == base.EstoqueOK && (p.Status == base.PagamentoAprovado || p.Status == base.PedidoCancelamentoSolicitado) {
 		return nil
 	}
+	
 	p.Historico = slices.Clone(p.Historico)
 	// Envio prova que estoque e pagamento foram aprovados. Normaliza a ordem
 	// causal mesmo se produtores diferentes chegarem em outra ordem na fila.
@@ -54,6 +56,7 @@ func (s *servicoPrincipal) aplicarEvento(tipo string, id int) error {
 		p.Historico = append(p.Historico, tipo)
 	}
 	p.Status = tipo
+	// publicar vem do confiavel.go e o avisar vem do estado.go que comunica o sse
 	if tipo == base.PagamentoRecusado || tipo == base.EstoqueIndisponivel {
 		if err := s.publicar(base.PedidoExcluido, base.OrderPayload{OrderID: id, Items: p.Itens}); err != nil {
 			return err

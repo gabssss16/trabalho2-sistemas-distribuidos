@@ -32,6 +32,7 @@ func respostaPedido(id int, p Pedido) PedidoResponse {
 	}
 	return PedidoResponse{id, p.Status, links}
 }
+
 func responderJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -64,6 +65,8 @@ func corsMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+//como o servidor atende os caminhos, depois o hateoas ajuda a descobrir os caminhos corretos para cada recurso. O servidor não precisa conhecer todos os caminhos, apenas o ponto de entrada e o HATEOAS fornece os links para os recursos relacionados.
 func (s *servicoPrincipal) rotas() http.Handler {
 	m := http.NewServeMux()
 	m.HandleFunc("POST /pedidos", s.criarPedido)
@@ -81,6 +84,7 @@ func (s *servicoPrincipal) rotas() http.Handler {
 }
 func (s *servicoPrincipal) criarPedido(w http.ResponseWriter, r *http.Request) {
 	var req CriarPedidoRequest
+	//le o json e valida pra ver se nao tem 0 ou negativo
 	if lerJSON(w, r, &req) != nil {
 		erroHTTP(w, 400, "JSON inválido")
 		return
@@ -97,9 +101,14 @@ func (s *servicoPrincipal) criarPedido(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.proximoID++
-	p := Pedido{Itens: req.Itens, Status: base.PedidoCriado, Historico: []string{base.PedidoCriado}}
+	p := Pedido{
+		Itens: req.Itens, 
+		Status: base.PedidoCriado, 
+		Historico: []string{base.PedidoCriado}
+	}
 	// O consumidor só altera o pedido após a liberação do mutex.
 	s.pedidos[id] = p
+	//publica no rabbitmq
 	if err := s.publicar(base.PedidoCriado, base.OrderPayload{OrderID: id, Items: req.Itens}); err != nil {
 		delete(s.pedidos, id)
 		erroHTTP(w, 503, "falha ao publicar pedido")
@@ -108,6 +117,7 @@ func (s *servicoPrincipal) criarPedido(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Location", fmt.Sprintf("/pedidos/%d", id))
 	responderJSON(w, 201, respostaPedido(id, p))
 }
+
 func idPedido(r *http.Request) (int, error) {
 	id, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil || id <= 0 {
@@ -162,6 +172,7 @@ func (s *servicoPrincipal) cancelarPedido(w http.ResponseWriter, r *http.Request
 func (s *servicoPrincipal) listarProdutos(w http.ResponseWriter, r *http.Request) {
 	s.proxy(w, r, strings.TrimRight(s.estoqueURL, "/")+"/produtos")
 }
+//valida se o pedido existe e se nao ta finalizado antes de mandar pro ms pagamento
 func (s *servicoPrincipal) consultarPagamento(w http.ResponseWriter, r *http.Request) {
 	id, err := idPedido(r)
 	if err != nil {
@@ -181,17 +192,21 @@ func (s *servicoPrincipal) consultarPagamento(w http.ResponseWriter, r *http.Req
 	}
 	s.proxy(w, r, fmt.Sprintf("%s/pagamentos/%d", strings.TrimRight(s.pagamentoURL, "/"), id))
 }
+//intermediario entre o navegador e os ms pagamento e estoque
 func (s *servicoPrincipal) proxy(w http.ResponseWriter, r *http.Request, url string) {
+	// monta a req url
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
 	if err != nil {
 		erroHTTP(w, 502, "endereço do serviço inválido")
 		return
 	}
+	// envia a req pro ms e espera a resposta
 	resp, err := s.cliente.Do(req)
 	if err != nil {
 		erroHTTP(w, 503, "serviço temporariamente indisponível")
 		return
 	}
+	
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
 	if err != nil || len(body) > 1<<20 || !json.Valid(body) {
@@ -214,6 +229,7 @@ func (s *servicoPrincipal) alterarInteresse(w http.ResponseWriter, r *http.Reque
 		erroHTTP(w, 400, "JSON inválido")
 		return
 	}
+	//padrao de trim e lower
 	i, err := base.NormalizarInteresse(base.InteressePromocaoPayload{Email: req.Email, Categorias: req.Categorias, Acao: acao})
 	if err != nil {
 		erroHTTP(w, 400, err.Error())

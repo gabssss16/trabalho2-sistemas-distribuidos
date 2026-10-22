@@ -14,7 +14,7 @@ func (s *servicoPrincipal) handleSSE(w http.ResponseWriter, r *http.Request) {
 		erroHTTP(w, 400, err.Error())
 		return
 	}
-	cursor := 0
+	cursor := 0 //guarda o num do ultimo evento enviado pro cliente
 	if value := r.Header.Get("Last-Event-ID"); value != "" {
 		cursor, err = strconv.Atoi(value)
 		if err != nil || cursor < 0 {
@@ -38,6 +38,8 @@ func (s *servicoPrincipal) handleSSE(w http.ResponseWriter, r *http.Request) {
 		erroHTTP(w, 400, "Last-Event-ID além do histórico")
 		return
 	}
+	//cria canal pra conexao e registra no map de clientes 
+	//quando o status mudar o avisar vai mandar um sinal pra esse canal 
 	c := make(chan struct{}, 1)
 	if s.clientes[id] == nil {
 		s.clientes[id] = make(map[chan struct{}]struct{})
@@ -52,10 +54,12 @@ func (s *servicoPrincipal) handleSSE(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 	}()
+	//configura o streaming e envia o status
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	controle := http.NewResponseController(w)
+	//escreve os dados e cama do o flush pra enviar pro cliente
 	escrever := func(texto string) error {
 		_ = controle.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if _, err := fmt.Fprint(w, texto); err != nil {
@@ -68,6 +72,7 @@ func (s *servicoPrincipal) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
+	//enquanto o pedido nao for finalizado, envia os eventos do historico e espera por novos eventos ou heartbeat
 	for {
 		s.mu.Lock()
 		p = s.pedidos[id]
@@ -86,6 +91,7 @@ func (s *servicoPrincipal) handleSSE(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-c:
+		//pra nao cortar conexao, envia heartbeat a cada 15s se nao tiver evento novo
 		case <-heartbeat.C:
 			if escrever(": heartbeat\n\n") != nil {
 				return

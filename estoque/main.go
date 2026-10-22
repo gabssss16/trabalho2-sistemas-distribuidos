@@ -85,16 +85,19 @@ type produto struct {
 	Quantidade int    `json:"quantity"`
 }
 
+//registro de pedidos, controle pra caso de exclusão, pra devolver o estoque
 type reserva struct {
 	Itens  []base.OrderItem `json:"items"`
 	Status string           `json:"status"`
 }
 
+//o que é gravado no json
 type estadoEstoque struct {
 	Produtos map[int]produto `json:"products"`
 	Pedidos  map[int]reserva `json:"orders"`
 }
 
+//estrutura pra abrir o json e controlar o acesso concorrente
 type estoquePersistente struct {
 	mu      sync.Mutex
 	caminho string
@@ -104,6 +107,7 @@ type estoquePersistente struct {
 func abrirEstoque(caminho string) (*estoquePersistente, error) {
 	s := &estoquePersistente{caminho: caminho}
 	conteudo, err := os.ReadFile(caminho)
+	//se nao existe, cria
 	if errors.Is(err, os.ErrNotExist) {
 		s.estado = estadoEstoque{Produtos: map[int]produto{
 			1: {ID: 1, Nome: "Produto A", Quantidade: 15},
@@ -138,7 +142,7 @@ func (s *estoquePersistente) processar(tipo string, pedido base.OrderPayload) (s
 	if tipo != base.PedidoCriado && tipo != base.PedidoExcluido {
 		return "", fmt.Errorf("%w: tipo", rabbitmq.ErrEventoInvalido)
 	}
-	// Copia o estado para manter a memória intacta caso a gravação falhe.
+	// Copia o estado no mapa proximo para manter a memória intacta caso a gravação falhe.
 	proximo := estadoEstoque{Produtos: make(map[int]produto), Pedidos: make(map[int]reserva)}
 	for id, p := range s.estado.Produtos {
 		proximo.Produtos[id] = p
@@ -146,9 +150,12 @@ func (s *estoquePersistente) processar(tipo string, pedido base.OrderPayload) (s
 	for id, r := range s.estado.Pedidos {
 		proximo.Pedidos[id] = r
 	}
+	// Verifica se o pedido já existe e se é possível processá-lo.
+	// se nao existe, anterior recebe o valor vazio de reserva{}, e existe = false
 	anterior, existe := proximo.Pedidos[pedido.OrderID]
 	resposta := ""
 	if tipo == base.PedidoExcluido {
+		//se duplicou a exclusão, ignora
 		if anterior.Status == base.PedidoExcluido {
 			return "", nil
 		}
@@ -174,6 +181,7 @@ func (s *estoquePersistente) processar(tipo string, pedido base.OrderPayload) (s
 		if len(pedido.Items) == 0 {
 			return "", fmt.Errorf("%w: pedido sem itens", rabbitmq.ErrEventoInvalido)
 		}
+		//soma as quantidades por produto
 		quantidades := make(map[int]int)
 		for _, item := range pedido.Items {
 			if item.ProductID <= 0 || item.Quantity <= 0 || quantidades[item.ProductID] > math.MaxInt-item.Quantity {
@@ -181,6 +189,7 @@ func (s *estoquePersistente) processar(tipo string, pedido base.OrderPayload) (s
 			}
 			quantidades[item.ProductID] += item.Quantity
 		}
+		//verifica se tem estoque suficiente, se sim, reserva e atualiza o estoque
 		resposta = base.EstoqueOK
 		for id, quantidade := range quantidades {
 			if p, existe := proximo.Produtos[id]; !existe || p.Quantidade < quantidade {
@@ -195,11 +204,14 @@ func (s *estoquePersistente) processar(tipo string, pedido base.OrderPayload) (s
 				proximo.Produtos[id] = p
 			}
 		}
+		// grava o pedido com os itens do payload, mesmo que a reserva falhe, pra poder devolver depois
 		proximo.Pedidos[pedido.OrderID] = reserva{Itens: append([]base.OrderItem(nil), pedido.Items...), Status: resposta}
 	}
+
 	if err := persistencia.Salvar(s.caminho, proximo); err != nil {
 		return "", err
 	}
+
 	s.estado = proximo
 	switch resposta {
 	case base.EstoqueOK:
@@ -213,6 +225,7 @@ func (s *estoquePersistente) processar(tipo string, pedido base.OrderPayload) (s
 			log.Printf("[ESTOQUE] Pedido %d EXCLUÍDO. Sem reserva para devolver.", pedido.OrderID)
 		}
 	}
+	//pro rabbitmq
 	return resposta, nil
 }
 
@@ -228,6 +241,7 @@ func (s *estoquePersistente) rotas() http.Handler {
 		}
 		s.mu.Unlock()
 		sort.Slice(produtos, func(i, j int) bool { return produtos[i].ID < produtos[j].ID })
+		//endpoint consultado pelo principal pra mostrar os produtos com estoque
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(produtos)
 	})

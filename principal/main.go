@@ -12,6 +12,8 @@ import (
 
 const FilaPrincipal = "fila.principal"
 
+// mapa usado pra associar o tipo de evento com o nome do produtor que gerou o evento. 
+// e vincular fila às routing keys corretas.
 var produtores = map[string]string{base.EstoqueOK: "estoque", base.EstoqueIndisponivel: "estoque", base.PagamentoAprovado: "pagamento", base.PagamentoRecusado: "pagamento", base.PedidoEnviado: "entrega"}
 
 func config(nome, padrao string) string {

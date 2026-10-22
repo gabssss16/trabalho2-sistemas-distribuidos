@@ -19,6 +19,23 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
+type cobranca struct {
+	Pedido      base.OrderPayload `json:"pedido"`
+	ChargeID    string            `json:"charge_id"`
+	CheckoutURL string            `json:"checkout_url"`
+	Status      string            `json:"status"`
+	Publicado   bool              `json:"published"`
+}
+
+type servicoPagamento struct {
+	mu                  sync.Mutex
+	mockURL, webhookURL string
+	cliente             *http.Client
+	cobrancas           map[int]cobranca
+	publicar            func(string, base.OrderPayload) error
+}
+
+// so reage a eventos do rabbitmq e expoe um endpoint HTTP para o gateway consultar o status da cobrança.
 func main() {
 	servico, err := abrirPagamento(
 		config("MOCK_PAGAMENTO_URL", "http://localhost:8083/cobrancas"),
@@ -58,6 +75,7 @@ func main() {
 func lerPedidoEstoque(d amqp.Delivery) (base.OrderPayload, error) {
 	return lerPedidoOrigem(d, base.EstoqueOK, "estoque")
 }
+
 func lerPedidoOrigem(d amqp.Delivery, tipo, produtor string) (base.OrderPayload, error) {
 	var pedido base.OrderPayload
 	evento, err := base.DesserializarEvento(d.Body)
@@ -74,6 +92,7 @@ func lerPedidoOrigem(d amqp.Delivery, tipo, produtor string) (base.OrderPayload,
 	if err := base.DesserializarPayload(evento, &pedido); err != nil {
 		return pedido, fmt.Errorf("%w: payload", rabbitmq.ErrEventoInvalido)
 	}
+	//verifica id, lista de itens e quantidades 
 	if pedido.OrderID <= 0 || len(pedido.Items) == 0 {
 		return pedido, fmt.Errorf("%w: pedido sem identificador ou itens", rabbitmq.ErrEventoInvalido)
 	}
@@ -92,22 +111,6 @@ func config(nome, padrao string) string {
 	return padrao
 }
 
-type cobranca struct {
-	Pedido      base.OrderPayload `json:"pedido"`
-	ChargeID    string            `json:"charge_id"`
-	CheckoutURL string            `json:"checkout_url"`
-	Status      string            `json:"status"`
-	Publicado   bool              `json:"published"`
-}
-
-type servicoPagamento struct {
-	mu                  sync.Mutex
-	mockURL, webhookURL string
-	cliente             *http.Client
-	cobrancas           map[int]cobranca
-	publicar            func(string, base.OrderPayload) error
-}
-
 func abrirPagamento(mockURL, webhookURL string) (*servicoPagamento, error) {
 	if !urlHTTP(mockURL) || !urlHTTP(webhookURL) {
 		return nil, fmt.Errorf("URLs do mock e webhook devem ser HTTP(S) absolutas")
@@ -118,7 +121,7 @@ func abrirPagamento(mockURL, webhookURL string) (*servicoPagamento, error) {
 	}
 	return s, nil
 }
-
+// filtro de segurança pra aceitar apenas URLs HTTP(S) absolutas, sem userinfo, host e path obrigatórios
 func urlHTTP(valor string) bool {
 	u, err := url.Parse(valor)
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" && u.User == nil
@@ -127,12 +130,14 @@ func urlHTTP(valor string) bool {
 func (s *servicoPagamento) criarCobranca(pedido base.OrderPayload) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	//ignora duplicatas
 	if existente, ok := s.cobrancas[pedido.OrderID]; ok {
 		if !pedidosIguais(existente.Pedido, pedido) {
 			return fmt.Errorf("%w: order_id reutilizado", rabbitmq.ErrEventoInvalido)
 		}
 		return nil
 	}
+	//monta o json e pede pra avisar no webhook quando o pagamento for aprovado ou recusado
 	requisicao := struct {
 		base.OrderPayload
 		WebhookURL string `json:"webhook_url"`
@@ -141,33 +146,41 @@ func (s *servicoPagamento) criarCobranca(pedido base.OrderPayload) error {
 	if err != nil {
 		return err
 	}
+	//timeout de 10s caso o mock trave
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	//envia a req pro mock e espera a resposta
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.mockURL, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	// O mock deve reutilizar a cobrança para esta chave em tentativas posteriores.
+	// impede do mock gerar cobranças duplicadas
 	req.Header.Set("Idempotency-Key", "pedido-"+strconv.Itoa(pedido.OrderID))
+	// envia a solicitação pro mock e espera a resposta
 	resp, err := s.cliente.Do(req)
 	if err != nil {
 		return fmt.Errorf("solicitar cobrança: %w", err)
 	}
 	defer resp.Body.Close()
+	// rejeita respostas HTTP não 2xx, que indicam falha do mock ou do gateway
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("mock retornou HTTP %d", resp.StatusCode)
 	}
+	//modelo esperado de resposta do mock: charge_id e checkout_url
 	var resposta struct {
 		ChargeID    string `json:"charge_id"`
 		CheckoutURL string `json:"checkout_url"`
 	}
+	//limite de mem
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&resposta); err != nil {
 		return fmt.Errorf("resposta do mock: %w", err)
 	}
+	// valida se o mock não é confiável e não informou charge_id e checkout_url válidos
 	if resposta.ChargeID == "" || !urlHTTP(resposta.CheckoutURL) {
 		return fmt.Errorf("mock não informou charge_id e checkout_url válidos")
 	}
+	// salva na mem como pendente, pra poder consultar depois e publicar o resultado no rabbitmq quando o webhook chegar
 	c := cobranca{Pedido: pedido, ChargeID: resposta.ChargeID, CheckoutURL: resposta.CheckoutURL, Status: "PENDENTE"}
 	s.cobrancas[pedido.OrderID] = c
 	log.Printf("[PAGAMENTO] Pedido %d: checkout %s", pedido.OrderID, c.CheckoutURL)
@@ -179,7 +192,7 @@ func pedidosIguais(a, b base.OrderPayload) bool {
 	y, _ := json.Marshal(b)
 	return bytes.Equal(x, y)
 }
-
+//expoe o endpoint HTTP para o gateway consultar o status da cobrança e receber webhooks do mock de pagamento.
 func (s *servicoPagamento) rotas() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /webhook", s.receberWebhook)
